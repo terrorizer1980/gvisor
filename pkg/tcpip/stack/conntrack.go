@@ -118,9 +118,11 @@ type conn struct {
 	mu sync.Mutex `state:"nosave"`
 	// tcb is TCB control block. It is used to keep track of states
 	// of tcp connection and is protected by mu.
+	// +checklocks:mu
 	tcb tcpconntrack.TCB
 	// lastUsed is the last time the connection saw a relevant packet, and
 	// is updated by each packet on the connection. It is protected by mu.
+	// +checklocks:mu
 	lastUsed time.Time `state:".(unixTime)"`
 }
 
@@ -143,6 +145,7 @@ func (cn *conn) timedOut(now time.Time) bool {
 // update the connection tracking state.
 //
 // Precondition: ct.mu must be held.
+// +checklocks:mu
 func (ct *conn) updateLocked(tcpHeader header.TCP, hook Hook) {
 	// Update the state of tcb. tcb assumes it's always initialized on the
 	// client. However, we only need to know whether the connection is
@@ -184,6 +187,7 @@ type ConnTrack struct {
 	mu sync.RWMutex `state:"nosave"`
 
 	// buckets is protected by mu.
+	// +checklocks:mu
 	buckets []bucket
 }
 
@@ -493,7 +497,9 @@ func (ct *ConnTrack) maybeInsertNoop(pkt *PacketBuffer, hook Hook) {
 		return
 	}
 	conn := newConn(tid, tid.reply(), manipNone, hook)
+	conn.mu.Lock()
 	conn.updateLocked(header.TCP(pkt.TransportHeader().View()), hook)
+	conn.mu.Unlock()
 	ct.insertConn(conn)
 }
 
@@ -583,6 +589,7 @@ func (ct *ConnTrack) reapUnused(start int, prevInterval time.Duration) (int, tim
 // Preconditions:
 // * ct.mu is locked for reading.
 // * bucket is locked.
+// +checklocks:mu
 func (ct *ConnTrack) reapTupleLocked(tuple *tuple, bucket int, now time.Time) bool {
 	if !tuple.conn.timedOut(now) {
 		return false

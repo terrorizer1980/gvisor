@@ -50,14 +50,16 @@ type NIC struct {
 	// Must be accessed using atomic operations.
 	enabled uint32
 
-	mu struct {
-		sync.RWMutex
-		spoofing    bool
-		promiscuous bool
-		// packetEPs is protected by mu, but the contained PacketEndpoint
-		// values are not.
-		packetEPs map[tcpip.NetworkProtocolNumber][]PacketEndpoint
-	}
+	// mu guards fields below.
+	mu sync.RWMutex
+	// +checklocks:mu
+	spoofing bool
+	// +checklocks:mu
+	promiscuous bool
+	// packetEPs is protected by mu, but the contained PacketEndpoint
+	// values are not.
+	// +checklocks:mu
+	packetEPs map[tcpip.NetworkProtocolNumber][]PacketEndpoint
 }
 
 // NICStats hold statistics for a NIC.
@@ -102,7 +104,10 @@ func newNIC(stack *Stack, id tcpip.NICID, name string, ep LinkEndpoint, ctx NICC
 		stats:            makeNICStats(),
 		networkEndpoints: make(map[tcpip.NetworkProtocolNumber]NetworkEndpoint),
 	}
-	nic.mu.packetEPs = make(map[tcpip.NetworkProtocolNumber][]PacketEndpoint)
+
+	nic.mu.Lock()
+	defer nic.mu.Unlock()
+	nic.packetEPs = make(map[tcpip.NetworkProtocolNumber][]PacketEndpoint)
 
 	// Check for Neighbor Unreachability Detection support.
 	var nud NUDHandler
@@ -125,11 +130,11 @@ func newNIC(stack *Stack, id tcpip.NICID, name string, ep LinkEndpoint, ctx NICC
 
 	// Register supported packet and network endpoint protocols.
 	for _, netProto := range header.Ethertypes {
-		nic.mu.packetEPs[netProto] = []PacketEndpoint{}
+		nic.packetEPs[netProto] = []PacketEndpoint{}
 	}
 	for _, netProto := range stack.networkProtocols {
 		netNum := netProto.Number()
-		nic.mu.packetEPs[netNum] = nil
+		nic.packetEPs[netNum] = nil
 		nic.networkEndpoints[netNum] = netProto.NewEndpoint(nic, stack, nud, nic)
 	}
 
@@ -143,6 +148,7 @@ func (n *NIC) getNetworkEndpoint(proto tcpip.NetworkProtocolNumber) NetworkEndpo
 }
 
 // Enabled implements NetworkInterface.
+// +checklocks:ignore
 func (n *NIC) Enabled() bool {
 	return atomic.LoadUint32(&n.enabled) == 1
 }
@@ -171,6 +177,7 @@ func (n *NIC) disable() {
 // It undoes the work done by enable.
 //
 // n MUST be locked.
+// +checklocks:mu
 func (n *NIC) disableLocked() {
 	if !n.setEnabled(false) {
 		return
@@ -230,14 +237,14 @@ func (n *NIC) remove() *tcpip.Error {
 // setPromiscuousMode enables or disables promiscuous mode.
 func (n *NIC) setPromiscuousMode(enable bool) {
 	n.mu.Lock()
-	n.mu.promiscuous = enable
+	n.promiscuous = enable
 	n.mu.Unlock()
 }
 
 // Promiscuous implements NetworkInterface.
 func (n *NIC) Promiscuous() bool {
 	n.mu.RLock()
-	rv := n.mu.promiscuous
+	rv := n.promiscuous
 	n.mu.RUnlock()
 	return rv
 }
@@ -316,7 +323,7 @@ func (n *NIC) WritePackets(r *Route, gso *GSO, pkts PacketBufferList, protocol t
 // setSpoofing enables or disables address spoofing.
 func (n *NIC) setSpoofing(enable bool) {
 	n.mu.Lock()
-	n.mu.spoofing = enable
+	n.spoofing = enable
 	n.mu.Unlock()
 }
 
@@ -334,7 +341,7 @@ func (n *NIC) primaryEndpoint(protocol tcpip.NetworkProtocolNumber, remoteAddr t
 	}
 
 	n.mu.RLock()
-	spoofing := n.mu.spoofing
+	spoofing := n.spoofing
 	n.mu.RUnlock()
 
 	return addressableEndpoint.AcquireOutgoingPrimaryAddress(remoteAddr, spoofing)
@@ -385,9 +392,9 @@ func (n *NIC) getAddressOrCreateTemp(protocol tcpip.NetworkProtocolNumber, addre
 	var spoofingOrPromiscuous bool
 	switch tempRef {
 	case spoofing:
-		spoofingOrPromiscuous = n.mu.spoofing
+		spoofingOrPromiscuous = n.spoofing
 	case promiscuous:
-		spoofingOrPromiscuous = n.mu.promiscuous
+		spoofingOrPromiscuous = n.promiscuous
 	}
 	n.mu.RUnlock()
 	return n.getAddressOrCreateTempInner(protocol, address, spoofingOrPromiscuous, peb)
@@ -634,9 +641,9 @@ func (n *NIC) DeliverNetworkPacket(remote, local tcpip.LinkAddress, protocol tcp
 	pkt.RXTransportChecksumValidated = n.LinkEndpoint.Capabilities()&CapabilityRXChecksumOffload != 0
 
 	// Are any packet type sockets listening for this network protocol?
-	packetEPs := n.mu.packetEPs[protocol]
+	packetEPs := n.packetEPs[protocol]
 	// Add any other packet type sockets that may be listening for all protocols.
-	packetEPs = append(packetEPs, n.mu.packetEPs[header.EthernetProtocolAll]...)
+	packetEPs = append(packetEPs, n.packetEPs[header.EthernetProtocolAll]...)
 	n.mu.RUnlock()
 	for _, ep := range packetEPs {
 		p := pkt.Clone()
@@ -683,7 +690,7 @@ func (n *NIC) DeliverOutboundPacket(remote, local tcpip.LinkAddress, protocol tc
 	// We do not deliver to protocol specific packet endpoints as on Linux
 	// only ETH_P_ALL endpoints get outbound packets.
 	// Add any other packet sockets that maybe listening for all protocols.
-	packetEPs := n.mu.packetEPs[header.EthernetProtocolAll]
+	packetEPs := n.packetEPs[header.EthernetProtocolAll]
 	n.mu.RUnlock()
 	for _, ep := range packetEPs {
 		p := pkt.Clone()
@@ -841,11 +848,11 @@ func (n *NIC) registerPacketEndpoint(netProto tcpip.NetworkProtocolNumber, ep Pa
 	n.mu.Lock()
 	defer n.mu.Unlock()
 
-	eps, ok := n.mu.packetEPs[netProto]
+	eps, ok := n.packetEPs[netProto]
 	if !ok {
 		return tcpip.ErrNotSupported
 	}
-	n.mu.packetEPs[netProto] = append(eps, ep)
+	n.packetEPs[netProto] = append(eps, ep)
 
 	return nil
 }
@@ -854,14 +861,14 @@ func (n *NIC) unregisterPacketEndpoint(netProto tcpip.NetworkProtocolNumber, ep 
 	n.mu.Lock()
 	defer n.mu.Unlock()
 
-	eps, ok := n.mu.packetEPs[netProto]
+	eps, ok := n.packetEPs[netProto]
 	if !ok {
 		return
 	}
 
 	for i, epOther := range eps {
 		if epOther == ep {
-			n.mu.packetEPs[netProto] = append(eps[:i], eps[i+1:]...)
+			n.packetEPs[netProto] = append(eps[:i], eps[i+1:]...)
 			return
 		}
 	}
@@ -872,7 +879,7 @@ func (n *NIC) unregisterPacketEndpoint(netProto tcpip.NetworkProtocolNumber, ep 
 // has been removed) unless the NIC is in spoofing mode, or temporary.
 func (n *NIC) isValidForOutgoing(ep AssignableAddressEndpoint) bool {
 	n.mu.RLock()
-	spoofing := n.mu.spoofing
+	spoofing := n.spoofing
 	n.mu.RUnlock()
 	return n.Enabled() && ep.IsAssigned(spoofing)
 }

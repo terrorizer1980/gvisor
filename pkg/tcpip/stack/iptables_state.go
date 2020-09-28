@@ -25,11 +25,13 @@ type unixTime struct {
 }
 
 // saveLastUsed is invoked by stateify.
+// +checklocks:ignore
 func (cn *conn) saveLastUsed() unixTime {
 	return unixTime{cn.lastUsed.Unix(), cn.lastUsed.UnixNano()}
 }
 
 // loadLastUsed is invoked by stateify.
+// +checklocks:ignore
 func (cn *conn) loadLastUsed(unix unixTime) {
 	cn.lastUsed = time.Unix(unix.second, unix.nano)
 }
