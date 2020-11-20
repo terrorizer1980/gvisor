@@ -26,7 +26,6 @@ import (
 	"gvisor.dev/gvisor/pkg/sentry/socket"
 	"gvisor.dev/gvisor/pkg/sentry/socket/unix/transport"
 	"gvisor.dev/gvisor/pkg/syserror"
-	"gvisor.dev/gvisor/pkg/tcpip"
 	"gvisor.dev/gvisor/pkg/usermem"
 )
 
@@ -344,18 +343,24 @@ func PackTClass(t *kernel.Task, tClass uint32, buf []byte) []byte {
 }
 
 // PackIPPacketInfo packs an IP_PKTINFO socket control message.
-func PackIPPacketInfo(t *kernel.Task, packetInfo tcpip.IPPacketInfo, buf []byte) []byte {
-	var p linux.ControlMessageIPPacketInfo
-	p.NIC = int32(packetInfo.NIC)
-	copy(p.LocalAddr[:], []byte(packetInfo.LocalAddr))
-	copy(p.DestinationAddr[:], []byte(packetInfo.DestinationAddr))
-
+func PackIPPacketInfo(t *kernel.Task, packetInfo *linux.ControlMessageIPPacketInfo, buf []byte) []byte {
 	return putCmsgStruct(
 		buf,
 		linux.SOL_IP,
 		linux.IP_PKTINFO,
 		t.Arch().Width(),
-		p,
+		packetInfo,
+	)
+}
+
+// PackSockExtendedErr packs an IP*_RECVERR socket control message.
+func PackSockExtendedErr(t *kernel.Task, sockErr linux.SockErrCMsg, buf []byte) []byte {
+	return putCmsgStruct(
+		buf,
+		sockErr.CMsgLevel(),
+		sockErr.CMsgType(),
+		t.Arch().Width(),
+		sockErr,
 	)
 }
 
@@ -384,7 +389,11 @@ func PackControlMessages(t *kernel.Task, cmsgs socket.ControlMessages, buf []byt
 	}
 
 	if cmsgs.IP.HasIPPacketInfo {
-		buf = PackIPPacketInfo(t, cmsgs.IP.PacketInfo, buf)
+		buf = PackIPPacketInfo(t, &cmsgs.IP.PacketInfo, buf)
+	}
+
+	if cmsgs.IP.SockErr != nil {
+		buf = PackSockExtendedErr(t, cmsgs.IP.SockErr, buf)
 	}
 
 	return buf
@@ -416,17 +425,15 @@ func CmsgsSpace(t *kernel.Task, cmsgs socket.ControlMessages) int {
 		space += cmsgSpace(t, linux.SizeOfControlMessageTClass)
 	}
 
+	if cmsgs.IP.HasIPPacketInfo {
+		space += cmsgSpace(t, linux.SizeOfControlMessageIPPacketInfo)
+	}
+
+	if cmsgs.IP.SockErr != nil {
+		space += cmsgSpace(t, cmsgs.IP.SockErr.SizeBytes())
+	}
+
 	return space
-}
-
-// NewIPPacketInfo returns the IPPacketInfo struct.
-func NewIPPacketInfo(packetInfo linux.ControlMessageIPPacketInfo) tcpip.IPPacketInfo {
-	var p tcpip.IPPacketInfo
-	p.NIC = tcpip.NICID(packetInfo.NIC)
-	copy([]byte(p.LocalAddr), packetInfo.LocalAddr[:])
-	copy([]byte(p.DestinationAddr), packetInfo.DestinationAddr[:])
-
-	return p
 }
 
 // Parse parses a raw socket control message into portable objects.
@@ -512,7 +519,17 @@ func Parse(t *kernel.Task, socketOrEndpoint interface{}, buf []byte) (socket.Con
 				var packetInfo linux.ControlMessageIPPacketInfo
 				binary.Unmarshal(buf[i:i+linux.SizeOfControlMessageIPPacketInfo], usermem.ByteOrder, &packetInfo)
 
-				cmsgs.IP.PacketInfo = NewIPPacketInfo(packetInfo)
+				cmsgs.IP.PacketInfo = packetInfo
+				i += binary.AlignUp(length, width)
+
+			case linux.IP_RECVERR:
+				var errCmsg linux.SockErrCMsgIPv4
+				if length < errCmsg.SizeBytes() {
+					return socket.ControlMessages{}, syserror.EINVAL
+				}
+
+				errCmsg.UnmarshalBytes(buf[i : i+errCmsg.SizeBytes()])
+				cmsgs.IP.SockErr = &errCmsg
 				i += binary.AlignUp(length, width)
 
 			default:
@@ -526,6 +543,16 @@ func Parse(t *kernel.Task, socketOrEndpoint interface{}, buf []byte) (socket.Con
 				}
 				cmsgs.IP.HasTClass = true
 				binary.Unmarshal(buf[i:i+linux.SizeOfControlMessageTClass], usermem.ByteOrder, &cmsgs.IP.TClass)
+				i += binary.AlignUp(length, width)
+
+			case linux.IPV6_RECVERR:
+				var errCmsg linux.SockErrCMsgIPv6
+				if length < errCmsg.SizeBytes() {
+					return socket.ControlMessages{}, syserror.EINVAL
+				}
+
+				errCmsg.UnmarshalBytes(buf[i : i+errCmsg.SizeBytes()])
+				cmsgs.IP.SockErr = &errCmsg
 				i += binary.AlignUp(length, width)
 
 			default:

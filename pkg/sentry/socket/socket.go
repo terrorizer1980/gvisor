@@ -44,7 +44,125 @@ import (
 // control messages.
 type ControlMessages struct {
 	Unix transport.ControlMessages
-	IP   tcpip.ControlMessages
+	IP   IPControlMessages
+}
+
+// packetInfoToLinux converts IPPacketInfo from tcpip format to Linux format.
+func packetInfoToLinux(packetInfo tcpip.IPPacketInfo) linux.ControlMessageIPPacketInfo {
+	var p linux.ControlMessageIPPacketInfo
+	p.NIC = int32(packetInfo.NIC)
+	copy(p.LocalAddr[:], []byte(packetInfo.LocalAddr))
+	copy(p.DestinationAddr[:], []byte(packetInfo.DestinationAddr))
+	return p
+}
+
+// errOriginToLinux maps tcpip socket origin to Linux socket origin constants.
+func errOriginToLinux(origin tcpip.SockErrOrigin) uint8 {
+	switch origin {
+	case tcpip.SockExtErrorOriginNone:
+		return linux.SO_EE_ORIGIN_NONE
+	case tcpip.SockExtErrorOriginLocal:
+		return linux.SO_EE_ORIGIN_LOCAL
+	case tcpip.SockExtErrorOriginICMP:
+		return linux.SO_EE_ORIGIN_ICMP
+	case tcpip.SockExtErrorOriginICMP6:
+		return linux.SO_EE_ORIGIN_ICMP6
+	default:
+		panic(fmt.Sprintf("unknown socket origin: %d", origin))
+	}
+}
+
+// sockErrCmsgToLinux converts SockError control message from tcpip format to
+// Linux format.
+func sockErrCmsgToLinux(sockErr *tcpip.SockError) linux.SockErrCMsg {
+	if sockErr == nil {
+		return nil
+	}
+
+	ee := linux.SockExtendedErr{
+		Errno:  uint32(syserr.TranslateNetstackError(sockErr.Err).ToLinux().Number()),
+		Origin: errOriginToLinux(sockErr.ErrOrigin),
+		Type:   sockErr.ErrType,
+		Code:   sockErr.ErrCode,
+		Info:   sockErr.ErrInfo,
+	}
+
+	switch sockErr.NetProto {
+	case header.IPv4ProtocolNumber:
+		errMsg := &linux.SockErrCMsgIPv4{SockExtendedErr: ee}
+		if len(sockErr.Offender.Addr) > 0 {
+			addr, _ := ConvertAddress(linux.AF_INET, sockErr.Offender)
+			errMsg.Offender = *addr.(*linux.SockAddrInet)
+		}
+		return errMsg
+	case header.IPv6ProtocolNumber:
+		errMsg := &linux.SockErrCMsgIPv6{SockExtendedErr: ee}
+		if len(sockErr.Offender.Addr) > 0 {
+			addr, _ := ConvertAddress(linux.AF_INET6, sockErr.Offender)
+			errMsg.Offender = *addr.(*linux.SockAddrInet6)
+		}
+		return errMsg
+	default:
+		panic(fmt.Sprintf("invalid net proto for creating SockErrCMsg: %d", sockErr.NetProto))
+	}
+}
+
+// NewIPControlMessagges converts the tcpip ControlMessgaes (which does not
+// have Linux specific format) to Linux format.
+func NewIPControlMessagges(cmgs tcpip.ControlMessages) IPControlMessages {
+	return IPControlMessages{
+		HasTimestamp:    cmgs.HasTimestamp,
+		Timestamp:       cmgs.Timestamp,
+		HasInq:          cmgs.HasInq,
+		Inq:             cmgs.Inq,
+		HasTOS:          cmgs.HasTOS,
+		TOS:             cmgs.TOS,
+		HasTClass:       cmgs.HasTClass,
+		TClass:          cmgs.TClass,
+		HasIPPacketInfo: cmgs.HasIPPacketInfo,
+		PacketInfo:      packetInfoToLinux(cmgs.PacketInfo),
+		SockErr:         sockErrCmsgToLinux(cmgs.SockErr),
+	}
+}
+
+// IPControlMessages contains socket control messages for IP sockets.
+// This can contain Linux specific structures unlike tcpip.ControlMessages.
+//
+// +stateify savable
+type IPControlMessages struct {
+	// HasTimestamp indicates whether Timestamp is valid/set.
+	HasTimestamp bool
+
+	// Timestamp is the time (in ns) that the last packet used to create
+	// the read data was received.
+	Timestamp int64
+
+	// HasInq indicates whether Inq is valid/set.
+	HasInq bool
+
+	// Inq is the number of bytes ready to be received.
+	Inq int32
+
+	// HasTOS indicates whether Tos is valid/set.
+	HasTOS bool
+
+	// TOS is the IPv4 type of service of the associated packet.
+	TOS uint8
+
+	// HasTClass indicates whether TClass is valid/set.
+	HasTClass bool
+
+	// TClass is the IPv6 traffic class of the associated packet.
+	TClass uint32
+
+	// HasIPPacketInfo indicates whether PacketInfo is set.
+	HasIPPacketInfo bool
+
+	// PacketInfo holds interface and address data on an incoming packet.
+	PacketInfo linux.ControlMessageIPPacketInfo
+
+	// SockErr is the dequeued socket error on recvmsg(MSG_ERRQUEUE).
+	SockErr linux.SockErrCMsg
 }
 
 // Release releases Unix domain socket credentials and rights.
