@@ -754,9 +754,6 @@ type baseEndpoint struct {
 	// or may be used if the endpoint is connected.
 	path string
 
-	// linger is used for SO_LINGER socket option.
-	linger tcpip.LingerOption
-
 	// ops is used to get socket level options.
 	ops tcpip.SocketOptions
 }
@@ -848,12 +845,6 @@ func (e *baseEndpoint) SendMsg(ctx context.Context, data [][]byte, c ControlMess
 
 // SetSockOpt sets a socket option.
 func (e *baseEndpoint) SetSockOpt(opt tcpip.SettableSocketOption) *tcpip.Error {
-	switch v := opt.(type) {
-	case *tcpip.LingerOption:
-		e.Lock()
-		e.linger = *v
-		e.Unlock()
-	}
 	return nil
 }
 
@@ -940,17 +931,8 @@ func (e *baseEndpoint) GetSockOptInt(opt tcpip.SockOptInt) (int, *tcpip.Error) {
 
 // GetSockOpt implements tcpip.Endpoint.GetSockOpt.
 func (e *baseEndpoint) GetSockOpt(opt tcpip.GettableSocketOption) *tcpip.Error {
-	switch o := opt.(type) {
-	case *tcpip.LingerOption:
-		e.Lock()
-		*o = e.linger
-		e.Unlock()
-		return nil
-
-	default:
-		log.Warningf("Unsupported socket option: %T", opt)
-		return tcpip.ErrUnknownProtocolOption
-	}
+	log.Warningf("Unsupported socket option: %T", opt)
+	return tcpip.ErrUnknownProtocolOption
 }
 
 // LastError implements Endpoint.LastError.

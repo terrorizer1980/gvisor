@@ -16,6 +16,8 @@ package tcpip
 
 import (
 	"sync/atomic"
+
+	"gvisor.dev/gvisor/pkg/sync"
 )
 
 // SocketOptionsHandler holds methods that help define endpoint specific
@@ -36,6 +38,9 @@ type SocketOptionsHandler interface {
 	// IsListening is invoked to fetch SO_ACCEPTCONN option value for an
 	// endpoint. It is used to indicate if the socket is a listening socket.
 	IsListening() bool
+
+	// LastError is invoked when SO_ERROR is read for an endpoint..
+	LastError() *Error
 }
 
 // DefaultSocketOptionsHandler is an embeddable type that implements no-op
@@ -56,6 +61,11 @@ func (*DefaultSocketOptionsHandler) OnKeepAliveSet(bool) {}
 // IsListening implements SocketOptionsHandler.IsListening.
 func (*DefaultSocketOptionsHandler) IsListening() bool { return false }
 
+// LastError implements SocketOptionsHandler.LastError.
+func (*DefaultSocketOptionsHandler) LastError() *Error {
+	return nil
+}
+
 // SocketOptions contains all the variables which store values for SOL_SOCKET
 // level options.
 //
@@ -65,29 +75,36 @@ type SocketOptions struct {
 
 	// These fields are accessed and modified using atomic operations.
 
-	// broadcastEnabled determines whether datagram sockets are allowed to send
-	// packets to a broadcast address.
+	// broadcastEnabled determines whether datagram sockets are allowed to
+	// send packets to a broadcast address.
 	broadcastEnabled uint32
 
-	// passCredEnabled determines whether SCM_CREDENTIALS socket control messages
-	// are enabled.
+	// passCredEnabled determines whether SCM_CREDENTIALS socket control
+	// messages are enabled.
 	passCredEnabled uint32
 
 	// noChecksumEnabled determines whether UDP checksum is disabled while
 	// transmitting for this socket.
 	noChecksumEnabled uint32
 
-	// reuseAddressEnabled determines whether Bind() should allow reuse of local
-	// address.
+	// reuseAddressEnabled determines whether Bind() should allow reuse of
+	// local address.
 	reuseAddressEnabled uint32
 
-	// reusePortEnabled determines whether to permit multiple sockets to be bound
-	// to an identical socket address.
+	// reusePortEnabled determines whether to permit multiple sockets to be
+	// bound to an identical socket address.
 	reusePortEnabled uint32
 
 	// keepAliveEnabled determines whether TCP keepalive is enabled for this
 	// socket.
 	keepAliveEnabled uint32
+
+	// mu protects the access to the below fields.
+	mu sync.Mutex `state:"nosave"`
+
+	// linger determines the amount of time TCP socket should linger before
+	// close.
+	linger LingerOption
 }
 
 // InitHandler initializes the handler. This must be called before using the
@@ -171,4 +188,33 @@ func (so *SocketOptions) SetKeepAlive(v bool) {
 func (so *SocketOptions) GetAcceptConn() bool {
 	// This option is completely endpoint dependent and unsettable.
 	return so.handler.IsListening()
+}
+
+// GetLastError gets value for SO_ERROR option.
+func (so *SocketOptions) GetLastError() *Error {
+	return so.handler.LastError()
+}
+
+// GetOutOfBandInline gets value for SO_OOBINLINE option.
+func (so *SocketOptions) GetOutOfBandInline() bool {
+	return true
+}
+
+// SetOutOfBandInline sets value for SO_OOBINLINE option. We currently do not
+// support disabling this option.
+func (so *SocketOptions) SetOutOfBandInline(v bool) {}
+
+// GetLinger gets value for SO_LINGER option.
+func (so *SocketOptions) GetLinger() LingerOption {
+	so.mu.Lock()
+	linger := so.linger
+	so.mu.Unlock()
+	return linger
+}
+
+// SetLinger sets value for SO_LINGER option.
+func (so *SocketOptions) SetLinger(linger LingerOption) {
+	so.mu.Lock()
+	so.linger = linger
+	so.mu.Unlock()
 }
