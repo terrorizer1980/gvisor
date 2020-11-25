@@ -8,6 +8,7 @@ go_library(
         "icmp.go",
         "igmp.go",
         "ipv4.go",
+        "stats.go",
     ],
     visibility = ["//visibility:public"],
     deps = [
@@ -47,5 +48,17 @@ go_test(
         "//pkg/tcpip/transport/udp",
         "//pkg/waiter",
         "@com_github_google_go_cmp//cmp:go_default_library",
+    ],
+)
+
+go_test(
+    name = "internal_test",
+    size = "small",
+    srcs = ["internal_test.go"],
+    library = ":ipv4",
+    deps = [
+        "//pkg/tcpip",
+        "//pkg/tcpip/network/testutil",
+        "//pkg/tcpip/stack",
     ],
 )
