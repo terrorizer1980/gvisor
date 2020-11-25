@@ -109,8 +109,8 @@ func (f *fakeTransportEndpoint) Write(p tcpip.Payloader, opts tcpip.WriteOptions
 	return int64(len(v)), nil, nil
 }
 
-func (*fakeTransportEndpoint) Peek([][]byte) (int64, tcpip.ControlMessages, *tcpip.Error) {
-	return 0, tcpip.ControlMessages{}, nil
+func (*fakeTransportEndpoint) Peek([][]byte) (int64, *tcpip.Error) {
+	return 0, nil
 }
 
 // SetSockOpt sets a socket option. Currently not supported.
@@ -239,7 +239,7 @@ func (f *fakeTransportEndpoint) HandlePacket(id stack.TransportEndpointID, pkt *
 	f.acceptQueue = append(f.acceptQueue, ep)
 }
 
-func (f *fakeTransportEndpoint) HandleControlPacket(stack.TransportEndpointID, stack.ControlType, uint32, *stack.PacketBuffer) {
+func (f *fakeTransportEndpoint) HandleControlPacket(tcpip.NetworkProtocolNumber, stack.TransportEndpointID, stack.ControlType, uint32, *stack.PacketBuffer) {
 	// Increment the number of received control packets.
 	f.proto.controlCount++
 }

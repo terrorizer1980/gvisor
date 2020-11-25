@@ -1305,6 +1305,15 @@ func (e *endpoint) LastError() *tcpip.Error {
 	return e.lastErrorLocked()
 }
 
+// UpdateLastError implements tcpip.SocketOptionsHandler.UpdateLastError.
+func (e *endpoint) UpdateLastError(err *tcpip.Error) {
+	e.LockUser()
+	e.lastErrorMu.Lock()
+	e.lastError = err
+	e.lastErrorMu.Unlock()
+	e.UnlockUser()
+}
+
 // Read reads data from the endpoint.
 func (e *endpoint) Read(*tcpip.FullAddress) (buffer.View, tcpip.ControlMessages, *tcpip.Error) {
 	e.LockUser()
@@ -1498,7 +1507,7 @@ func (e *endpoint) Write(p tcpip.Payloader, opts tcpip.WriteOptions) (int64, <-c
 // Peek reads data without consuming it from the endpoint.
 //
 // This method does not block if there is no data pending.
-func (e *endpoint) Peek(vec [][]byte) (int64, tcpip.ControlMessages, *tcpip.Error) {
+func (e *endpoint) Peek(vec [][]byte) (int64, *tcpip.Error) {
 	e.LockUser()
 	defer e.UnlockUser()
 
@@ -1506,10 +1515,10 @@ func (e *endpoint) Peek(vec [][]byte) (int64, tcpip.ControlMessages, *tcpip.Erro
 	// but has some pending unread data.
 	if s := e.EndpointState(); !s.connected() && s != StateClose {
 		if s == StateError {
-			return 0, tcpip.ControlMessages{}, e.hardErrorLocked()
+			return 0, e.hardErrorLocked()
 		}
 		e.stats.ReadErrors.InvalidEndpointState.Increment()
-		return 0, tcpip.ControlMessages{}, tcpip.ErrInvalidEndpointState
+		return 0, tcpip.ErrInvalidEndpointState
 	}
 
 	e.rcvListMu.Lock()
@@ -1518,9 +1527,9 @@ func (e *endpoint) Peek(vec [][]byte) (int64, tcpip.ControlMessages, *tcpip.Erro
 	if e.rcvBufUsed == 0 {
 		if e.rcvClosed || !e.EndpointState().connected() {
 			e.stats.ReadErrors.ReadClosed.Increment()
-			return 0, tcpip.ControlMessages{}, tcpip.ErrClosedForReceive
+			return 0, tcpip.ErrClosedForReceive
 		}
-		return 0, tcpip.ControlMessages{}, tcpip.ErrWouldBlock
+		return 0, tcpip.ErrWouldBlock
 	}
 
 	// Make a copy of vec so we can modify the slide headers.
@@ -1535,7 +1544,7 @@ func (e *endpoint) Peek(vec [][]byte) (int64, tcpip.ControlMessages, *tcpip.Erro
 
 			for len(v) > 0 {
 				if len(vec) == 0 {
-					return num, tcpip.ControlMessages{}, nil
+					return num, nil
 				}
 				if len(vec[0]) == 0 {
 					vec = vec[1:]
@@ -1550,7 +1559,7 @@ func (e *endpoint) Peek(vec [][]byte) (int64, tcpip.ControlMessages, *tcpip.Erro
 		}
 	}
 
-	return num, tcpip.ControlMessages{}, nil
+	return num, nil
 }
 
 // selectWindowLocked returns the new window without checking for shrinking or scaling
@@ -2727,8 +2736,43 @@ func (e *endpoint) enqueueSegment(s *segment) bool {
 	return true
 }
 
+func (e *endpoint) onICMPError(err *tcpip.Error, net tcpip.NetworkProtocolNumber, id stack.TransportEndpointID, errType byte, errCode byte, extra uint32, pkt *stack.PacketBuffer) {
+	// Update last error first.
+	e.lastErrorMu.Lock()
+	e.lastError = err
+	e.lastErrorMu.Unlock()
+
+	// Update the error queue if IP_RECVERR is enabled.
+	if e.SocketOptions().GetRecvError() {
+		e.SocketOptions().QueueErr(&tcpip.SockError{
+			Err:       err,
+			ErrOrigin: header.ICMPOriginFromNetProto(net),
+			ErrType:   errType,
+			ErrCode:   errCode,
+			ErrInfo:   extra,
+			// Linux passes the payload with the TCP header. We don't know if the TCP
+			// header even exists, it may not for fragmented packets.
+			Payload: pkt.Data.ToView(),
+			Dst: tcpip.FullAddress{
+				NIC:  pkt.NICID,
+				Addr: id.RemoteAddress,
+				Port: id.RemotePort,
+			},
+			Offender: tcpip.FullAddress{
+				NIC:  pkt.NICID,
+				Addr: id.LocalAddress,
+				Port: id.LocalPort,
+			},
+			NetProto: net,
+		})
+	}
+
+	// Notify of the error.
+	e.notifyProtocolGoroutine(notifyError)
+}
+
 // HandleControlPacket implements stack.TransportEndpoint.HandleControlPacket.
-func (e *endpoint) HandleControlPacket(id stack.TransportEndpointID, typ stack.ControlType, extra uint32, pkt *stack.PacketBuffer) {
+func (e *endpoint) HandleControlPacket(net tcpip.NetworkProtocolNumber, id stack.TransportEndpointID, typ stack.ControlType, extra uint32, pkt *stack.PacketBuffer) {
 	switch typ {
 	case stack.ControlPacketTooBig:
 		e.sndBufMu.Lock()
@@ -2741,16 +2785,10 @@ func (e *endpoint) HandleControlPacket(id stack.TransportEndpointID, typ stack.C
 		e.notifyProtocolGoroutine(notifyMTUChanged)
 
 	case stack.ControlNoRoute:
-		e.lastErrorMu.Lock()
-		e.lastError = tcpip.ErrNoRoute
-		e.lastErrorMu.Unlock()
-		e.notifyProtocolGoroutine(notifyError)
+		e.onICMPError(tcpip.ErrNoRoute, net, id, byte(header.ICMPv4DstUnreachable), byte(header.ICMPv4HostUnreachable), extra, pkt)
 
 	case stack.ControlNetworkUnreachable:
-		e.lastErrorMu.Lock()
-		e.lastError = tcpip.ErrNetworkUnreachable
-		e.lastErrorMu.Unlock()
-		e.notifyProtocolGoroutine(notifyError)
+		e.onICMPError(tcpip.ErrNetworkUnreachable, net, id, byte(header.ICMPv6DstUnreachable), byte(header.ICMPv6NetworkUnreachable), extra, pkt)
 	}
 }
 

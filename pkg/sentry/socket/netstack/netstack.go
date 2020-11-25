@@ -320,7 +320,7 @@ type socketOpsCommon struct {
 	readView buffer.View
 	// readCM holds control message information for the last packet read
 	// from Endpoint.
-	readCM         tcpip.ControlMessages
+	readCM         socket.IPControlMessages
 	sender         tcpip.FullAddress
 	linkPacketInfo tcpip.LinkPacketInfo
 
@@ -408,7 +408,7 @@ func (s *socketOpsCommon) fetchReadView() *syserr.Error {
 	}
 
 	s.readView = v
-	s.readCM = cms
+	s.readCM = socket.NewIPControlMessagges(cms)
 	atomic.StoreUint32(&s.readViewHasData, 1)
 
 	return nil
@@ -1417,6 +1417,13 @@ func getSockOptIPv6(t *kernel.Task, s socket.SocketOps, ep commonEndpoint, name 
 
 		v := primitive.Int32(boolToInt32(ep.SocketOptions().GetReceiveTClass()))
 		return &v, nil
+	case linux.IPV6_RECVERR:
+		if outLen < sizeOfInt32 {
+			return nil, syserr.ErrInvalidArgument
+		}
+
+		v := primitive.Int32(boolToInt32(ep.SocketOptions().GetRecvError()))
+		return &v, nil
 
 	case linux.IP6T_ORIGINAL_DST:
 		if outLen < int(binary.Size(linux.SockAddrInet6{})) {
@@ -1581,6 +1588,14 @@ func getSockOptIP(t *kernel.Task, s socket.SocketOps, ep commonEndpoint, name in
 		}
 
 		v := primitive.Int32(boolToInt32(ep.SocketOptions().GetReceiveTOS()))
+		return &v, nil
+
+	case linux.IP_RECVERR:
+		if outLen < sizeOfInt32 {
+			return nil, syserr.ErrInvalidArgument
+		}
+
+		v := primitive.Int32(boolToInt32(ep.SocketOptions().GetRecvError()))
 		return &v, nil
 
 	case linux.IP_PKTINFO:
@@ -2115,6 +2130,16 @@ func setSockOptIPv6(t *kernel.Task, s socket.SocketOps, ep commonEndpoint, name 
 
 		ep.SocketOptions().SetReceiveTClass(v != 0)
 		return nil
+	case linux.IPV6_RECVERR:
+		if len(optVal) == 0 {
+			return nil
+		}
+		v, err := parseIntOrChar(optVal)
+		if err != nil {
+			return err
+		}
+		ep.SocketOptions().SetRecvError(v != 0)
+		return nil
 
 	case linux.IP6T_SO_SET_REPLACE:
 		if len(optVal) < linux.SizeOfIP6TReplace {
@@ -2303,6 +2328,17 @@ func setSockOptIP(t *kernel.Task, s socket.SocketOps, ep commonEndpoint, name in
 		ep.SocketOptions().SetReceiveTOS(v != 0)
 		return nil
 
+	case linux.IP_RECVERR:
+		if len(optVal) == 0 {
+			return nil
+		}
+		v, err := parseIntOrChar(optVal)
+		if err != nil {
+			return err
+		}
+		ep.SocketOptions().SetRecvError(v != 0)
+		return nil
+
 	case linux.IP_PKTINFO:
 		if len(optVal) == 0 {
 			return nil
@@ -2360,7 +2396,6 @@ func setSockOptIP(t *kernel.Task, s socket.SocketOps, ep commonEndpoint, name in
 		linux.IP_NODEFRAG,
 		linux.IP_OPTIONS,
 		linux.IP_PASSSEC,
-		linux.IP_RECVERR,
 		linux.IP_RECVFRAGSIZE,
 		linux.IP_RECVOPTS,
 		linux.IP_RECVORIGDSTADDR,
@@ -2437,7 +2472,6 @@ func emitUnimplementedEventIPv6(t *kernel.Task, name int) {
 		linux.IPV6_MULTICAST_IF,
 		linux.IPV6_MULTICAST_LOOP,
 		linux.IPV6_RECVDSTOPTS,
-		linux.IPV6_RECVERR,
 		linux.IPV6_RECVFRAGSIZE,
 		linux.IPV6_RECVHOPLIMIT,
 		linux.IPV6_RECVHOPOPTS,
@@ -2472,7 +2506,6 @@ func emitUnimplementedEventIP(t *kernel.Task, name int) {
 		linux.IP_PKTINFO,
 		linux.IP_PKTOPTIONS,
 		linux.IP_MTU_DISCOVER,
-		linux.IP_RECVERR,
 		linux.IP_RECVTTL,
 		linux.IP_RECVTOS,
 		linux.IP_MTU,
@@ -2701,7 +2734,7 @@ func (s *socketOpsCommon) nonBlockingRead(ctx context.Context, dst usermem.IOSeq
 		// We need to peek beyond the first message.
 		dst = dst.DropFirst(n)
 		num, err := dst.CopyOutFrom(ctx, safemem.FromVecReaderFunc{func(dsts [][]byte) (int64, error) {
-			n, _, err := s.Endpoint.Peek(dsts)
+			n, err := s.Endpoint.Peek(dsts)
 			// TODO(b/78348848): Handle peek timestamp.
 			if err != nil {
 				return int64(n), syserr.TranslateNetstackError(err).ToError()
@@ -2745,15 +2778,18 @@ func (s *socketOpsCommon) nonBlockingRead(ctx context.Context, dst usermem.IOSeq
 
 func (s *socketOpsCommon) controlMessages() socket.ControlMessages {
 	return socket.ControlMessages{
-		IP: tcpip.ControlMessages{
+		IP: socket.IPControlMessages{
 			HasTimestamp:    s.readCM.HasTimestamp && s.sockOptTimestamp,
 			Timestamp:       s.readCM.Timestamp,
+			HasInq:          s.readCM.HasInq,
+			Inq:             s.readCM.Inq,
 			HasTOS:          s.readCM.HasTOS,
 			TOS:             s.readCM.TOS,
 			HasTClass:       s.readCM.HasTClass,
 			TClass:          s.readCM.TClass,
 			HasIPPacketInfo: s.readCM.HasIPPacketInfo,
 			PacketInfo:      s.readCM.PacketInfo,
+			SockErr:         s.readCM.SockErr,
 		},
 	}
 }
@@ -2770,9 +2806,65 @@ func (s *socketOpsCommon) updateTimestamp() {
 	}
 }
 
+// dequeueErr is analogous to net/core/skbuff.c:sock_dequeue_err_skb().
+func (s *socketOpsCommon) dequeueErr() *tcpip.SockError {
+	so := s.Endpoint.SocketOptions()
+	err := so.DequeueErr()
+	if err == nil {
+		return nil
+	}
+
+	if nextErr := so.PeekErr(); nextErr != nil && nextErr.ErrOrigin.IsICMPErr() {
+		so.SetLastError(nextErr.Err)
+	} else if err.ErrOrigin.IsICMPErr() {
+		so.SetLastError(nil)
+	}
+	return err
+}
+
+// addrFamilyFromNetProto returns the address family identifier for the given
+// network protocol.
+func addrFamilyFromNetProto(net tcpip.NetworkProtocolNumber) int {
+	switch net {
+	case header.IPv4ProtocolNumber:
+		return linux.AF_INET
+	case header.IPv6ProtocolNumber:
+		return linux.AF_INET6
+	default:
+		panic(fmt.Sprintf("invalid net proto for addr family inference: %d", net))
+	}
+}
+
+// recvErr handles MSG_ERRQUEUE for recvmsg(2).
+// This is analogous to net/ipv4/ip_sockglue.c:ip_recv_error().
+func (s *socketOpsCommon) recvErr(t *kernel.Task, dst usermem.IOSequence) (int, int, linux.SockAddr, uint32, socket.ControlMessages, *syserr.Error) {
+	sockErr := s.dequeueErr()
+	if sockErr == nil {
+		return 0, 0, nil, 0, socket.ControlMessages{}, syserr.ErrTryAgain
+	}
+
+	// The payload of the original packet that caused the error is passed as
+	// normal data via msg_iovec.  -- recvmsg(2)
+	msgFlags := linux.MSG_ERRQUEUE
+	if int(dst.NumBytes()) < len(sockErr.Payload) {
+		msgFlags |= linux.MSG_TRUNC
+	}
+	n, err := dst.CopyOut(t, sockErr.Payload)
+
+	// The original destination address of the datagram that caused the error is
+	// supplied via msg_name.  -- recvmsg(2)
+	dstAddr, dstAddrLen := socket.ConvertAddress(addrFamilyFromNetProto(sockErr.NetProto), sockErr.Dst)
+	cmgs := socket.ControlMessages{IP: socket.NewIPControlMessagges(tcpip.ControlMessages{SockErr: sockErr})}
+	return n, msgFlags, dstAddr, dstAddrLen, cmgs, syserr.FromError(err)
+}
+
 // RecvMsg implements the linux syscall recvmsg(2) for sockets backed by
 // tcpip.Endpoint.
 func (s *socketOpsCommon) RecvMsg(t *kernel.Task, dst usermem.IOSequence, flags int, haveDeadline bool, deadline ktime.Time, senderRequested bool, controlDataLen uint64) (n int, msgFlags int, senderAddr linux.SockAddr, senderAddrLen uint32, controlMessages socket.ControlMessages, err *syserr.Error) {
+	if flags&linux.MSG_ERRQUEUE != 0 {
+		return s.recvErr(t, dst)
+	}
+
 	trunc := flags&linux.MSG_TRUNC != 0
 	peek := flags&linux.MSG_PEEK != 0
 	dontWait := flags&linux.MSG_DONTWAIT != 0

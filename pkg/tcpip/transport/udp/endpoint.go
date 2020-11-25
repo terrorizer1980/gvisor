@@ -228,6 +228,13 @@ func (e *endpoint) LastError() *tcpip.Error {
 	return err
 }
 
+// UpdateLastError implements tcpip.SocketOptionsHandler.UpdateLastError.
+func (e *endpoint) UpdateLastError(err *tcpip.Error) {
+	e.lastErrorMu.Lock()
+	e.lastError = err
+	e.lastErrorMu.Unlock()
+}
+
 // Abort implements stack.TransportEndpoint.Abort.
 func (e *endpoint) Abort() {
 	e.Close()
@@ -509,6 +516,20 @@ func (e *endpoint) write(p tcpip.Payloader, opts tcpip.WriteOptions) (int64, <-c
 	}
 	if len(v) > header.UDPMaximumPacketSize {
 		// Payload can't possibly fit in a packet.
+		so := e.SocketOptions()
+		if so.GetRecvError() {
+			so.QueueLocalErr(
+				tcpip.ErrMessageTooLong,
+				route.NetProto,
+				header.UDPMaximumPacketSize,
+				tcpip.FullAddress{
+					NIC:  route.NICID(),
+					Addr: route.RemoteAddress,
+					Port: dstPort,
+				},
+				v,
+			)
+		}
 		return 0, nil, tcpip.ErrMessageTooLong
 	}
 
@@ -545,8 +566,8 @@ func (e *endpoint) write(p tcpip.Payloader, opts tcpip.WriteOptions) (int64, <-c
 }
 
 // Peek only returns data from a single datagram, so do nothing here.
-func (e *endpoint) Peek([][]byte) (int64, tcpip.ControlMessages, *tcpip.Error) {
-	return 0, tcpip.ControlMessages{}, nil
+func (e *endpoint) Peek([][]byte) (int64, *tcpip.Error) {
+	return 0, nil
 }
 
 // OnReuseAddressSet implements tcpip.SocketOptionsHandler.OnReuseAddressSet.
@@ -1267,7 +1288,6 @@ func verifyChecksum(hdr header.UDP, pkt *stack.PacketBuffer) bool {
 // HandlePacket is called by the stack when new packets arrive to this transport
 // endpoint.
 func (e *endpoint) HandlePacket(id stack.TransportEndpointID, pkt *stack.PacketBuffer) {
-	// Get the header then trim it from the view.
 	hdr := header.UDP(pkt.TransportHeader().View())
 	if int(hdr.Length()) > pkt.Data.Size()+header.UDPMinimumSize {
 		// Malformed packet.
@@ -1275,6 +1295,10 @@ func (e *endpoint) HandlePacket(id stack.TransportEndpointID, pkt *stack.PacketB
 		e.stats.ReceiveErrors.MalformedPacketsReceived.Increment()
 		return
 	}
+
+	// TODO(gvisor.dev/issues/5033): We should mirror the Network layer and cap
+	// packets at "Parse" instead of when handling a packet.
+	pkt.Data.CapLength(int(hdr.PayloadLength()))
 
 	if !verifyChecksum(hdr, pkt) {
 		// Checksum Error.
@@ -1309,7 +1333,7 @@ func (e *endpoint) HandlePacket(id stack.TransportEndpointID, pkt *stack.PacketB
 		senderAddress: tcpip.FullAddress{
 			NIC:  pkt.NICID,
 			Addr: id.RemoteAddress,
-			Port: header.UDP(hdr).SourcePort(),
+			Port: hdr.SourcePort(),
 		},
 	}
 	packet.data = pkt.Data
@@ -1341,15 +1365,63 @@ func (e *endpoint) HandlePacket(id stack.TransportEndpointID, pkt *stack.PacketB
 	}
 }
 
+func (e *endpoint) onICMPError(err *tcpip.Error, net tcpip.NetworkProtocolNumber, id stack.TransportEndpointID, errType byte, errCode byte, extra uint32, pkt *stack.PacketBuffer) {
+	// Update last error first.
+	e.lastErrorMu.Lock()
+	e.lastError = err
+	e.lastErrorMu.Unlock()
+
+	// Update the error queue if IP_RECVERR is enabled.
+	if e.SocketOptions().GetRecvError() {
+		// Linux passes the payload without the UDP header.
+		var payload []byte
+		udp := header.UDP(pkt.Data.ToView())
+		if len(udp) >= header.UDPMinimumSize {
+			payload = udp.Payload()
+		}
+
+		e.SocketOptions().QueueErr(&tcpip.SockError{
+			Err:       err,
+			ErrOrigin: header.ICMPOriginFromNetProto(net),
+			ErrType:   errType,
+			ErrCode:   errCode,
+			ErrInfo:   extra,
+			Payload:   payload,
+			Dst: tcpip.FullAddress{
+				NIC:  pkt.NICID,
+				Addr: id.RemoteAddress,
+				Port: id.RemotePort,
+			},
+			Offender: tcpip.FullAddress{
+				NIC:  pkt.NICID,
+				Addr: id.LocalAddress,
+				Port: id.LocalPort,
+			},
+			NetProto: net,
+		})
+	}
+
+	// Notify of the error.
+	e.waiterQueue.Notify(waiter.EventErr)
+}
+
 // HandleControlPacket implements stack.TransportEndpoint.HandleControlPacket.
-func (e *endpoint) HandleControlPacket(id stack.TransportEndpointID, typ stack.ControlType, extra uint32, pkt *stack.PacketBuffer) {
+func (e *endpoint) HandleControlPacket(net tcpip.NetworkProtocolNumber, id stack.TransportEndpointID, typ stack.ControlType, extra uint32, pkt *stack.PacketBuffer) {
 	if typ == stack.ControlPortUnreachable {
 		if e.EndpointState() == StateConnected {
-			e.lastErrorMu.Lock()
-			e.lastError = tcpip.ErrConnectionRefused
-			e.lastErrorMu.Unlock()
-
-			e.waiterQueue.Notify(waiter.EventErr)
+			var errType byte
+			var errCode byte
+			switch net {
+			case header.IPv4ProtocolNumber:
+				errType = byte(header.ICMPv4DstUnreachable)
+				errCode = byte(header.ICMPv4PortUnreachable)
+			case header.IPv6ProtocolNumber:
+				errType = byte(header.ICMPv6DstUnreachable)
+				errCode = byte(header.ICMPv6PortUnreachable)
+			default:
+				panic(fmt.Sprintf("unsupported net proto for infering ICMP type and code: %d", net))
+			}
+			e.onICMPError(tcpip.ErrConnectionRefused, net, id, errType, errCode, extra, pkt)
 			return
 		}
 	}

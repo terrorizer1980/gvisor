@@ -206,8 +206,8 @@ func (*endpoint) Write(p tcpip.Payloader, opts tcpip.WriteOptions) (int64, <-cha
 }
 
 // Peek implements tcpip.Endpoint.Peek.
-func (*endpoint) Peek([][]byte) (int64, tcpip.ControlMessages, *tcpip.Error) {
-	return 0, tcpip.ControlMessages{}, nil
+func (*endpoint) Peek([][]byte) (int64, *tcpip.Error) {
+	return 0, nil
 }
 
 // Disconnect implements tcpip.Endpoint.Disconnect. Packet sockets cannot be
@@ -372,6 +372,13 @@ func (ep *endpoint) LastError() *tcpip.Error {
 	err := ep.lastError
 	ep.lastError = nil
 	return err
+}
+
+// UpdateLastError implements tcpip.SocketOptionsHandler.UpdateLastError.
+func (ep *endpoint) UpdateLastError(err *tcpip.Error) {
+	ep.lastErrorMu.Lock()
+	ep.lastError = err
+	ep.lastErrorMu.Unlock()
 }
 
 // GetSockOpt implements tcpip.Endpoint.GetSockOpt.

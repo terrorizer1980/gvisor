@@ -183,7 +183,7 @@ func (epsByNIC *endpointsByNIC) handlePacket(id TransportEndpointID, pkt *Packet
 }
 
 // HandleControlPacket implements stack.TransportEndpoint.HandleControlPacket.
-func (epsByNIC *endpointsByNIC) handleControlPacket(n *NIC, id TransportEndpointID, typ ControlType, extra uint32, pkt *PacketBuffer) {
+func (epsByNIC *endpointsByNIC) handleControlPacket(n *NIC, net tcpip.NetworkProtocolNumber, id TransportEndpointID, typ ControlType, extra uint32, pkt *PacketBuffer) {
 	epsByNIC.mu.RLock()
 	defer epsByNIC.mu.RUnlock()
 
@@ -199,7 +199,7 @@ func (epsByNIC *endpointsByNIC) handleControlPacket(n *NIC, id TransportEndpoint
 	// broadcast like we are doing with handlePacket above?
 
 	// multiPortEndpoints are guaranteed to have at least one element.
-	selectEndpoint(id, mpep, epsByNIC.seed).HandleControlPacket(id, typ, extra, pkt)
+	selectEndpoint(id, mpep, epsByNIC.seed).HandleControlPacket(net, id, typ, extra, pkt)
 }
 
 // registerEndpoint returns true if it succeeds. It fails and returns
@@ -610,7 +610,7 @@ func (d *transportDemuxer) deliverControlPacket(n *NIC, net tcpip.NetworkProtoco
 		return false
 	}
 
-	ep.handleControlPacket(n, id, typ, extra, pkt)
+	ep.handleControlPacket(n, net, id, typ, extra, pkt)
 	return true
 }
 

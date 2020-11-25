@@ -343,6 +343,16 @@ func hostInetFilters() seccomp.SyscallRules {
 			},
 			{
 				seccomp.MatchAny{},
+				seccomp.EqualTo(syscall.SOL_IP),
+				seccomp.EqualTo(syscall.IP_PKTINFO),
+			},
+			{
+				seccomp.MatchAny{},
+				seccomp.EqualTo(syscall.SOL_IP),
+				seccomp.EqualTo(syscall.IP_RECVERR),
+			},
+			{
+				seccomp.MatchAny{},
 				seccomp.EqualTo(syscall.SOL_IPV6),
 				seccomp.EqualTo(syscall.IPV6_TCLASS),
 			},
@@ -350,6 +360,11 @@ func hostInetFilters() seccomp.SyscallRules {
 				seccomp.MatchAny{},
 				seccomp.EqualTo(syscall.SOL_IPV6),
 				seccomp.EqualTo(syscall.IPV6_RECVTCLASS),
+			},
+			{
+				seccomp.MatchAny{},
+				seccomp.EqualTo(syscall.SOL_IPV6),
+				seccomp.EqualTo(syscall.IPV6_RECVERR),
 			},
 			{
 				seccomp.MatchAny{},
@@ -421,13 +436,6 @@ func hostInetFilters() seccomp.SyscallRules {
 		syscall.SYS_SETSOCKOPT: []seccomp.Rule{
 			{
 				seccomp.MatchAny{},
-				seccomp.EqualTo(syscall.SOL_IPV6),
-				seccomp.EqualTo(syscall.IPV6_V6ONLY),
-				seccomp.MatchAny{},
-				seccomp.EqualTo(4),
-			},
-			{
-				seccomp.MatchAny{},
 				seccomp.EqualTo(syscall.SOL_SOCKET),
 				seccomp.EqualTo(syscall.SO_SNDBUF),
 				seccomp.MatchAny{},
@@ -470,6 +478,13 @@ func hostInetFilters() seccomp.SyscallRules {
 			},
 			{
 				seccomp.MatchAny{},
+				seccomp.EqualTo(syscall.SOL_IP),
+				seccomp.EqualTo(syscall.IP_RECVERR),
+				seccomp.MatchAny{},
+				seccomp.EqualTo(4),
+			},
+			{
+				seccomp.MatchAny{},
 				seccomp.EqualTo(syscall.SOL_IPV6),
 				seccomp.EqualTo(syscall.IPV6_TCLASS),
 				seccomp.MatchAny{},
@@ -479,6 +494,20 @@ func hostInetFilters() seccomp.SyscallRules {
 				seccomp.MatchAny{},
 				seccomp.EqualTo(syscall.SOL_IPV6),
 				seccomp.EqualTo(syscall.IPV6_RECVTCLASS),
+				seccomp.MatchAny{},
+				seccomp.EqualTo(4),
+			},
+			{
+				seccomp.MatchAny{},
+				seccomp.EqualTo(syscall.SOL_IPV6),
+				seccomp.EqualTo(syscall.IPV6_RECVERR),
+				seccomp.MatchAny{},
+				seccomp.EqualTo(4),
+			},
+			{
+				seccomp.MatchAny{},
+				seccomp.EqualTo(syscall.SOL_IPV6),
+				seccomp.EqualTo(syscall.IPV6_V6ONLY),
 				seccomp.MatchAny{},
 				seccomp.EqualTo(4),
 			},
