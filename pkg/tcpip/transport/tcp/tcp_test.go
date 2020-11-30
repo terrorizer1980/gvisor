@@ -1380,9 +1380,8 @@ func TestConnectBindToDevice(t *testing.T) {
 			defer c.Cleanup()
 
 			c.Create(-1)
-			bindToDevice := tcpip.BindToDeviceOption(test.device)
-			if err := c.EP.SetSockOpt(&bindToDevice); err != nil {
-				t.Fatalf("c.EP.SetSockOpt(&%T(%d)): %s", bindToDevice, bindToDevice, err)
+			if err := c.EP.SocketOptions().SetBindToDevice(int32(test.device)); err != nil {
+				t.Fatalf("c.EP.SetSockOpt(&%T(%d)): %s", test.device, test.device, err)
 			}
 			// Start connection attempt.
 			waitEntry, _ := waiter.NewChannelEntry(nil)
@@ -4274,9 +4273,9 @@ func checkRecvBufferSize(t *testing.T, ep tcpip.Endpoint, v int) {
 func checkSendBufferSize(t *testing.T, ep tcpip.Endpoint, v int) {
 	t.Helper()
 
-	s, err := ep.GetSockOptInt(tcpip.SendBufferSizeOption)
+	s, err := ep.SocketOptions().GetSendBufferSize()
 	if err != nil {
-		t.Fatalf("GetSockOpt failed: %s", err)
+		t.Fatalf("GetSendBufferSize failed: %s", err)
 	}
 
 	if int(s) != v {
@@ -4382,9 +4381,7 @@ func TestMinMaxBufferSizes(t *testing.T) {
 
 	checkRecvBufferSize(t, ep, 200)
 
-	if err := ep.SetSockOptInt(tcpip.SendBufferSizeOption, 149); err != nil {
-		t.Fatalf("SetSockOptInt(SendBufferSizeOption, 299) failed: %s", err)
-	}
+	ep.SocketOptions().SetSendBufferSize(149, false)
 
 	checkSendBufferSize(t, ep, 300)
 
@@ -4396,9 +4393,7 @@ func TestMinMaxBufferSizes(t *testing.T) {
 	// Values above max are capped at max and then doubled.
 	checkRecvBufferSize(t, ep, tcp.DefaultReceiveBufferSize*20*2)
 
-	if err := ep.SetSockOptInt(tcpip.SendBufferSizeOption, 1+tcp.DefaultSendBufferSize*30); err != nil {
-		t.Fatalf("SetSockOptInt(SendBufferSizeOption) failed: %s", err)
-	}
+	ep.SocketOptions().SetSendBufferSize(1+tcp.DefaultSendBufferSize*30, false)
 
 	// Values above max are capped at max and then doubled.
 	checkSendBufferSize(t, ep, tcp.DefaultSendBufferSize*30*2)
@@ -4429,7 +4424,7 @@ func TestBindToDeviceOption(t *testing.T) {
 		name                 string
 		setBindToDevice      *tcpip.NICID
 		setBindToDeviceError *tcpip.Error
-		getBindToDevice      tcpip.BindToDeviceOption
+		getBindToDevice      int32
 	}{
 		{"GetDefaultValue", nil, nil, 0},
 		{"BindToNonExistent", nicIDPtr(999), tcpip.ErrUnknownDevice, 0},
@@ -4439,15 +4434,13 @@ func TestBindToDeviceOption(t *testing.T) {
 	for _, testAction := range testActions {
 		t.Run(testAction.name, func(t *testing.T) {
 			if testAction.setBindToDevice != nil {
-				bindToDevice := tcpip.BindToDeviceOption(*testAction.setBindToDevice)
-				if gotErr, wantErr := ep.SetSockOpt(&bindToDevice), testAction.setBindToDeviceError; gotErr != wantErr {
+				bindToDevice := int32(*testAction.setBindToDevice)
+				if gotErr, wantErr := ep.SocketOptions().SetBindToDevice(bindToDevice), testAction.setBindToDeviceError; gotErr != wantErr {
 					t.Errorf("got SetSockOpt(&%T(%d)) = %s, want = %s", bindToDevice, bindToDevice, gotErr, wantErr)
 				}
 			}
-			bindToDevice := tcpip.BindToDeviceOption(88888)
-			if err := ep.GetSockOpt(&bindToDevice); err != nil {
-				t.Errorf("GetSockOpt(&%T): %s", bindToDevice, err)
-			} else if bindToDevice != testAction.getBindToDevice {
+			bindToDevice := ep.SocketOptions().GetBindToDevice()
+			if bindToDevice != testAction.getBindToDevice {
 				t.Errorf("got bindToDevice = %d, want %d", bindToDevice, testAction.getBindToDevice)
 			}
 		})

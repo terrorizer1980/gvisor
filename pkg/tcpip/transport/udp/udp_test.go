@@ -22,6 +22,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/go-cmp/cmp"
 	"gvisor.dev/gvisor/pkg/tcpip"
 	"gvisor.dev/gvisor/pkg/tcpip/buffer"
 	"gvisor.dev/gvisor/pkg/tcpip/checker"
@@ -554,7 +555,7 @@ func TestBindToDeviceOption(t *testing.T) {
 		name                 string
 		setBindToDevice      *tcpip.NICID
 		setBindToDeviceError *tcpip.Error
-		getBindToDevice      tcpip.BindToDeviceOption
+		getBindToDevice      int32
 	}{
 		{"GetDefaultValue", nil, nil, 0},
 		{"BindToNonExistent", nicIDPtr(999), tcpip.ErrUnknownDevice, 0},
@@ -564,15 +565,13 @@ func TestBindToDeviceOption(t *testing.T) {
 	for _, testAction := range testActions {
 		t.Run(testAction.name, func(t *testing.T) {
 			if testAction.setBindToDevice != nil {
-				bindToDevice := tcpip.BindToDeviceOption(*testAction.setBindToDevice)
-				if gotErr, wantErr := ep.SetSockOpt(&bindToDevice), testAction.setBindToDeviceError; gotErr != wantErr {
+				bindToDevice := int32(*testAction.setBindToDevice)
+				if gotErr, wantErr := ep.SocketOptions().SetBindToDevice(bindToDevice), testAction.setBindToDeviceError; gotErr != wantErr {
 					t.Errorf("got SetSockOpt(&%T(%d)) = %s, want = %s", bindToDevice, bindToDevice, gotErr, wantErr)
 				}
 			}
-			bindToDevice := tcpip.BindToDeviceOption(88888)
-			if err := ep.GetSockOpt(&bindToDevice); err != nil {
-				t.Errorf("GetSockOpt(&%T): %s", bindToDevice, err)
-			} else if bindToDevice != testAction.getBindToDevice {
+			bindToDevice := ep.SocketOptions().GetBindToDevice()
+			if bindToDevice != testAction.getBindToDevice {
 				t.Errorf("got bindToDevice = %d, want = %d", bindToDevice, testAction.getBindToDevice)
 			}
 		})
@@ -1427,6 +1426,93 @@ func TestReadIPPacketInfo(t *testing.T) {
 	}
 }
 
+func TestReadRecvOriginalDstAddr(t *testing.T) {
+	tests := []struct {
+		name                    string
+		proto                   tcpip.NetworkProtocolNumber
+		flow                    testFlow
+		expectedOriginalDstAddr tcpip.FullAddress
+	}{
+		{
+			name:                    "IPv4 unicast",
+			proto:                   header.IPv4ProtocolNumber,
+			flow:                    unicastV4,
+			expectedOriginalDstAddr: tcpip.FullAddress{1, stackAddr, stackPort},
+		},
+		{
+			name:  "IPv4 multicast",
+			proto: header.IPv4ProtocolNumber,
+			flow:  multicastV4,
+			// This should actually be a unicast address assigned to the interface.
+			//
+			// TODO(gvisor.dev/issue/3556): This check is validating incorrect
+			// behaviour. We still include the test so that once the bug is
+			// resolved, this test will start to fail and the individual tasked
+			// with fixing this bug knows to also fix this test :).
+			expectedOriginalDstAddr: tcpip.FullAddress{1, multicastAddr, stackPort},
+		},
+		{
+			name:  "IPv4 broadcast",
+			proto: header.IPv4ProtocolNumber,
+			flow:  broadcast,
+			// This should actually be a unicast address assigned to the interface.
+			//
+			// TODO(gvisor.dev/issue/3556): This check is validating incorrect
+			// behaviour. We still include the test so that once the bug is
+			// resolved, this test will start to fail and the individual tasked
+			// with fixing this bug knows to also fix this test :).
+			expectedOriginalDstAddr: tcpip.FullAddress{1, broadcastAddr, stackPort},
+		},
+		{
+			name:                    "IPv6 unicast",
+			proto:                   header.IPv6ProtocolNumber,
+			flow:                    unicastV6,
+			expectedOriginalDstAddr: tcpip.FullAddress{1, stackV6Addr, stackPort},
+		},
+		{
+			name:  "IPv6 multicast",
+			proto: header.IPv6ProtocolNumber,
+			flow:  multicastV6,
+			// This should actually be a unicast address assigned to the interface.
+			//
+			// TODO(gvisor.dev/issue/3556): This check is validating incorrect
+			// behaviour. We still include the test so that once the bug is
+			// resolved, this test will start to fail and the individual tasked
+			// with fixing this bug knows to also fix this test :).
+			expectedOriginalDstAddr: tcpip.FullAddress{1, multicastV6Addr, stackPort},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			c := newDualTestContext(t, defaultMTU)
+			defer c.cleanup()
+
+			c.createEndpoint(test.proto)
+
+			bindAddr := tcpip.FullAddress{Port: stackPort}
+			if err := c.ep.Bind(bindAddr); err != nil {
+				t.Fatalf("Bind(%+v): %s", bindAddr, err)
+			}
+
+			if test.flow.isMulticast() {
+				ifoptSet := tcpip.AddMembershipOption{NIC: 1, MulticastAddr: test.flow.getMcastAddr()}
+				if err := c.ep.SetSockOpt(&ifoptSet); err != nil {
+					c.t.Fatalf("SetSockOpt(&%#v): %s:", ifoptSet, err)
+				}
+			}
+
+			c.ep.SocketOptions().SetReceiveOriginalDstAddress(true)
+
+			testRead(c, test.flow, checker.ReceiveOriginalDstAddr(test.expectedOriginalDstAddr))
+
+			if got := c.s.Stats().UDP.PacketsReceived.Value(); got != 1 {
+				t.Fatalf("Read did not increment PacketsReceived: got = %d, want = 1", got)
+			}
+		})
+	}
+}
+
 func TestWriteIncrementsPacketsSent(t *testing.T) {
 	c := newDualTestContext(t, defaultMTU)
 	defer c.cleanup()
@@ -1827,27 +1913,31 @@ func TestV4UnknownDestination(t *testing.T) {
 			icmpPkt := header.ICMPv4(hdr.Payload())
 			payloadIPHeader := header.IPv4(icmpPkt.Payload())
 			incomingHeaderLength := header.IPv4MinimumSize + header.UDPMinimumSize
-			wantLen := len(payload)
+			wantPayloadLen := len(payload)
 			if tc.largePayload {
 				// To work out the data size we need to simulate what the sender would
 				// have done. The wanted size is the total available minus the sum of
 				// the headers in the UDP AND ICMP packets, given that we know the test
 				// had only a minimal IP header but the ICMP sender will have allowed
 				// for a maximally sized packet header.
-				wantLen = header.IPv4MinimumProcessableDatagramSize - header.IPv4MaximumHeaderSize - header.ICMPv4MinimumSize - incomingHeaderLength
+				wantPayloadLen = header.IPv4MinimumProcessableDatagramSize - header.IPv4MaximumHeaderSize - header.ICMPv4MinimumSize - incomingHeaderLength
 			}
 
 			// In the case of large payloads the IP packet may be truncated. Update
 			// the length field before retrieving the udp datagram payload.
 			// Add back the two headers within the payload.
-			payloadIPHeader.SetTotalLength(uint16(wantLen + incomingHeaderLength))
-
+			payloadIPHeader.SetTotalLength(uint16(wantPayloadLen + incomingHeaderLength))
 			origDgram := header.UDP(payloadIPHeader.Payload())
-			if got, want := len(origDgram.Payload()), wantLen; got != want {
-				t.Fatalf("unexpected payload length got: %d, want: %d", got, want)
+			wantDgramLen := wantPayloadLen + header.UDPMinimumSize
+
+			if got, want := len(origDgram), wantDgramLen; got != want {
+				t.Fatalf("got len(origDgram) = %d, want = %d", got, want)
 			}
-			if got, want := origDgram.Payload(), payload[:wantLen]; !bytes.Equal(got, want) {
-				t.Fatalf("unexpected payload got: %d, want: %d", got, want)
+			// Correct UDP length to access payload.
+			origDgram.SetLength(uint16(wantDgramLen))
+
+			if got, want := origDgram.Payload(), payload[:wantPayloadLen]; !bytes.Equal(got, want) {
+				t.Fatalf("got origDgram.Payload() = %x, want = %x", got, want)
 			}
 		})
 	}
@@ -1922,20 +2012,23 @@ func TestV6UnknownDestination(t *testing.T) {
 
 			icmpPkt := header.ICMPv6(hdr.Payload())
 			payloadIPHeader := header.IPv6(icmpPkt.Payload())
-			wantLen := len(payload)
+			wantPayloadLen := len(payload)
 			if tc.largePayload {
-				wantLen = header.IPv6MinimumMTU - header.IPv6MinimumSize*2 - header.ICMPv6MinimumSize - header.UDPMinimumSize
+				wantPayloadLen = header.IPv6MinimumMTU - header.IPv6MinimumSize*2 - header.ICMPv6MinimumSize - header.UDPMinimumSize
 			}
+			wantDgramLen := wantPayloadLen + header.UDPMinimumSize
 			// In case of large payloads the IP packet may be truncated. Update
 			// the length field before retrieving the udp datagram payload.
-			payloadIPHeader.SetPayloadLength(uint16(wantLen + header.UDPMinimumSize))
+			payloadIPHeader.SetPayloadLength(uint16(wantDgramLen))
 
 			origDgram := header.UDP(payloadIPHeader.Payload())
-			if got, want := len(origDgram.Payload()), wantLen; got != want {
-				t.Fatalf("unexpected payload length got: %d, want: %d", got, want)
+			if got, want := len(origDgram), wantPayloadLen+header.UDPMinimumSize; got != want {
+				t.Fatalf("got len(origDgram) = %d, want = %d", got, want)
 			}
-			if got, want := origDgram.Payload(), payload[:wantLen]; !bytes.Equal(got, want) {
-				t.Fatalf("unexpected payload got: %v, want: %v", got, want)
+			// Correct UDP length to access payload.
+			origDgram.SetLength(uint16(wantPayloadLen + header.UDPMinimumSize))
+			if got, want := origDgram.Payload(), payload[:wantPayloadLen]; !bytes.Equal(got, want) {
+				t.Fatalf("got origDgram.Payload() = %x, want = %x", got, want)
 			}
 		})
 	}
@@ -2444,6 +2537,70 @@ func TestOutgoingSubnetBroadcast(t *testing.T) {
 
 			if n, _, err := ep.Write(data, opts); err != expectedErrWithoutBcastOpt {
 				t.Fatalf("got ep.Write(_, _) = (%d, _, %v), want = (_, _, %v)", n, err, expectedErrWithoutBcastOpt)
+			}
+		})
+	}
+}
+
+func TestReceiveShortLength(t *testing.T) {
+	flows := []testFlow{unicastV4, unicastV6}
+	for _, flow := range flows {
+		t.Run(flow.String(), func(t *testing.T) {
+			c := newDualTestContext(t, defaultMTU)
+			defer c.cleanup()
+
+			c.createEndpointForFlow(flow)
+
+			// Bind to wildcard.
+			bindAddr := tcpip.FullAddress{Port: stackPort}
+			if err := c.ep.Bind(bindAddr); err != nil {
+				c.t.Fatalf("c.ep.Bind(%#v): %s", bindAddr, err)
+			}
+
+			payload := newPayload()
+			extraBytes := []byte{1, 2, 3, 4}
+			h := flow.header4Tuple(incoming)
+			var buf buffer.View
+			var proto tcpip.NetworkProtocolNumber
+
+			// Build packets with extra bytes not accounted for in the UDP length
+			// field.
+			var udp header.UDP
+			if flow.isV4() {
+				buf = c.buildV4Packet(payload, &h)
+				buf = append(buf, extraBytes...)
+				ip := header.IPv4(buf)
+				ip.SetTotalLength(ip.TotalLength() + uint16(len(extraBytes)))
+				ip.SetChecksum(0)
+				ip.SetChecksum(^ip.CalculateChecksum())
+				proto = ipv4.ProtocolNumber
+				udp = ip.Payload()
+			} else {
+				buf = c.buildV6Packet(payload, &h)
+				buf = append(buf, extraBytes...)
+				ip := header.IPv6(buf)
+				ip.SetPayloadLength(ip.PayloadLength() + uint16(len(extraBytes)))
+				proto = ipv6.ProtocolNumber
+				udp = ip.Payload()
+			}
+
+			if diff := cmp.Diff(payload, udp.Payload()); diff != "" {
+				t.Errorf("udp.Payload() mismatch (-want +got):\n%s", diff)
+			}
+
+			c.linkEP.InjectInbound(proto, stack.NewPacketBuffer(stack.PacketBufferOptions{
+				Data: buf.ToVectorisedView(),
+			}))
+
+			// Try to receive the data.
+			v, _, err := c.ep.Read(nil)
+			if err != nil {
+				t.Fatalf("c.ep.Read(..): %s", err)
+			}
+
+			// Check the payload is read back without extra bytes.
+			if diff := cmp.Diff(buffer.View(payload), v); diff != "" {
+				t.Errorf("c.ep.Read(..) mismatch (-want +got):\n%s", diff)
 			}
 		})
 	}

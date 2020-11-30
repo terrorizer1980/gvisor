@@ -12,16 +12,21 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "gtest/gtest.h"
+#include <vector>
 
-namespace {
+#include "test/syscalls/linux/ip_socket_test_util.h"
+#include "test/syscalls/linux/socket_ipv6_udp_unbound.h"
+#include "test/syscalls/linux/socket_test_util.h"
+#include "test/util/test_util.h"
 
-TEST(Image, Sanity0) {
-  // Do nothing (in shard 0).
-}
+namespace gvisor {
+namespace testing {
 
-TEST(Image, Sanity1) {
-  // Do nothing (in shard 1).
-}
+INSTANTIATE_TEST_SUITE_P(
+    IPv6UDPSockets, IPv6UDPUnboundSocketTest,
+    ::testing::ValuesIn(ApplyVec<SocketKind>(IPv6UDPUnboundSocket,
+                                             AllBitwiseCombinations(List<int>{
+                                                 0, SOCK_NONBLOCK}))));
 
-}  // namespace
+}  // namespace testing
+}  // namespace gvisor

@@ -12,5 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Package database holds benchmarks around database applications.
-package database
+// Package atomicptrmap instantiates generic_atomicptrmap for testing.
+package atomicptrmap
+
+type testValue struct {
+	val int
+}

@@ -12,5 +12,18 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Package database holds benchmarks around database applications.
-package database
+#ifndef GVISOR_TEST_SYSCALLS_LINUX_SOCKET_IPV6_UDP_UNBOUND_H_
+#define GVISOR_TEST_SYSCALLS_LINUX_SOCKET_IPV6_UDP_UNBOUND_H_
+
+#include "test/syscalls/linux/socket_test_util.h"
+
+namespace gvisor {
+namespace testing {
+
+// Test fixture for tests that apply to IPv6 UDP sockets.
+using IPv6UDPUnboundSocketTest = SimpleSocketTest;
+
+}  // namespace testing
+}  // namespace gvisor
+
+#endif  // GVISOR_TEST_SYSCALLS_LINUX_SOCKET_IPV6_UDP_UNBOUND_H_

@@ -428,11 +428,7 @@ func (s *socketOpsCommon) Release(ctx context.Context) {
 		return
 	}
 
-	var v tcpip.LingerOption
-	if err := s.Endpoint.GetSockOpt(&v); err != nil {
-		return
-	}
-
+	v := s.Endpoint.SocketOptions().GetLinger()
 	// The case for zero timeout is handled in tcp endpoint close function.
 	// Close is blocked until either:
 	// 1. The endpoint state is not in any of the states: FIN-WAIT1,
@@ -965,7 +961,7 @@ func getSockOptSocket(t *kernel.Task, s socket.SocketOps, ep commonEndpoint, fam
 		}
 
 		// Get the last error and convert it.
-		err := ep.LastError()
+		err := ep.SocketOptions().GetLastError()
 		if err == nil {
 			optP := primitive.Int32(0)
 			return &optP, nil
@@ -1000,7 +996,7 @@ func getSockOptSocket(t *kernel.Task, s socket.SocketOps, ep commonEndpoint, fam
 			return nil, syserr.ErrInvalidArgument
 		}
 
-		size, err := ep.GetSockOptInt(tcpip.SendBufferSizeOption)
+		size, err := ep.SocketOptions().GetSendBufferSize()
 		if err != nil {
 			return nil, syserr.TranslateNetstackError(err)
 		}
@@ -1046,10 +1042,7 @@ func getSockOptSocket(t *kernel.Task, s socket.SocketOps, ep commonEndpoint, fam
 		return &v, nil
 
 	case linux.SO_BINDTODEVICE:
-		var v tcpip.BindToDeviceOption
-		if err := ep.GetSockOpt(&v); err != nil {
-			return nil, syserr.TranslateNetstackError(err)
-		}
+		v := ep.SocketOptions().GetBindToDevice()
 		if v == 0 {
 			var b primitive.ByteSlice
 			return &b, nil
@@ -1092,11 +1085,8 @@ func getSockOptSocket(t *kernel.Task, s socket.SocketOps, ep commonEndpoint, fam
 			return nil, syserr.ErrInvalidArgument
 		}
 
-		var v tcpip.LingerOption
 		var linger linux.Linger
-		if err := ep.GetSockOpt(&v); err != nil {
-			return nil, syserr.TranslateNetstackError(err)
-		}
+		v := ep.SocketOptions().GetLinger()
 
 		if v.Enabled {
 			linger.OnOff = 1
@@ -1127,13 +1117,8 @@ func getSockOptSocket(t *kernel.Task, s socket.SocketOps, ep commonEndpoint, fam
 			return nil, syserr.ErrInvalidArgument
 		}
 
-		var v tcpip.OutOfBandInlineOption
-		if err := ep.GetSockOpt(&v); err != nil {
-			return nil, syserr.TranslateNetstackError(err)
-		}
-
-		vP := primitive.Int32(v)
-		return &vP, nil
+		v := primitive.Int32(boolToInt32(ep.SocketOptions().GetOutOfBandInline()))
+		return &v, nil
 
 	case linux.SO_NO_CHECK:
 		if outLen < sizeOfInt32 {
@@ -1418,6 +1403,14 @@ func getSockOptIPv6(t *kernel.Task, s socket.SocketOps, ep commonEndpoint, name 
 		v := primitive.Int32(boolToInt32(ep.SocketOptions().GetReceiveTClass()))
 		return &v, nil
 
+	case linux.IPV6_RECVORIGDSTADDR:
+		if outLen < sizeOfInt32 {
+			return nil, syserr.ErrInvalidArgument
+		}
+
+		v := primitive.Int32(boolToInt32(ep.SocketOptions().GetReceiveOriginalDstAddress()))
+		return &v, nil
+
 	case linux.IP6T_ORIGINAL_DST:
 		if outLen < int(binary.Size(linux.SockAddrInet6{})) {
 			return nil, syserr.ErrInvalidArgument
@@ -1599,6 +1592,14 @@ func getSockOptIP(t *kernel.Task, s socket.SocketOps, ep commonEndpoint, name in
 		v := primitive.Int32(boolToInt32(ep.SocketOptions().GetHeaderIncluded()))
 		return &v, nil
 
+	case linux.IP_RECVORIGDSTADDR:
+		if outLen < sizeOfInt32 {
+			return nil, syserr.ErrInvalidArgument
+		}
+
+		v := primitive.Int32(boolToInt32(ep.SocketOptions().GetReceiveOriginalDstAddress()))
+		return &v, nil
+
 	case linux.SO_ORIGINAL_DST:
 		if outLen < int(binary.Size(linux.SockAddrInet{})) {
 			return nil, syserr.ErrInvalidArgument
@@ -1750,7 +1751,8 @@ func setSockOptSocket(t *kernel.Task, s socket.SocketOps, ep commonEndpoint, nam
 		}
 
 		v := usermem.ByteOrder.Uint32(optVal)
-		return syserr.TranslateNetstackError(ep.SetSockOptInt(tcpip.SendBufferSizeOption, int(v)))
+		ep.SocketOptions().SetSendBufferSize(int64(v), false)
+		return nil
 
 	case linux.SO_RCVBUF:
 		if len(optVal) < sizeOfInt32 {
@@ -1785,8 +1787,7 @@ func setSockOptSocket(t *kernel.Task, s socket.SocketOps, ep commonEndpoint, nam
 		}
 		name := string(optVal[:n])
 		if name == "" {
-			v := tcpip.BindToDeviceOption(0)
-			return syserr.TranslateNetstackError(ep.SetSockOpt(&v))
+			return syserr.TranslateNetstackError(ep.SocketOptions().SetBindToDevice(0))
 		}
 		s := t.NetworkContext()
 		if s == nil {
@@ -1794,8 +1795,7 @@ func setSockOptSocket(t *kernel.Task, s socket.SocketOps, ep commonEndpoint, nam
 		}
 		for nicID, nic := range s.Interfaces() {
 			if nic.Name == name {
-				v := tcpip.BindToDeviceOption(nicID)
-				return syserr.TranslateNetstackError(ep.SetSockOpt(&v))
+				return syserr.TranslateNetstackError(ep.SocketOptions().SetBindToDevice(nicID))
 			}
 		}
 		return syserr.ErrUnknownDevice
@@ -1864,8 +1864,8 @@ func setSockOptSocket(t *kernel.Task, s socket.SocketOps, ep commonEndpoint, nam
 			socket.SetSockOptEmitUnimplementedEvent(t, name)
 		}
 
-		opt := tcpip.OutOfBandInlineOption(v)
-		return syserr.TranslateNetstackError(ep.SetSockOpt(&opt))
+		ep.SocketOptions().SetOutOfBandInline(v != 0)
+		return nil
 
 	case linux.SO_NO_CHECK:
 		if len(optVal) < sizeOfInt32 {
@@ -1888,10 +1888,11 @@ func setSockOptSocket(t *kernel.Task, s socket.SocketOps, ep commonEndpoint, nam
 			socket.SetSockOptEmitUnimplementedEvent(t, name)
 		}
 
-		return syserr.TranslateNetstackError(
-			ep.SetSockOpt(&tcpip.LingerOption{
-				Enabled: v.OnOff != 0,
-				Timeout: time.Second * time.Duration(v.Linger)}))
+		ep.SocketOptions().SetLinger(tcpip.LingerOption{
+			Enabled: v.OnOff != 0,
+			Timeout: time.Second * time.Duration(v.Linger),
+		})
+		return nil
 
 	case linux.SO_DETACH_FILTER:
 		// optval is ignored.
@@ -2093,6 +2094,15 @@ func setSockOptIPv6(t *kernel.Task, s socket.SocketOps, ep commonEndpoint, name 
 		linux.MCAST_UNBLOCK_SOURCE:
 
 		t.Kernel().EmitUnimplementedEvent(t)
+
+	case linux.IPV6_RECVORIGDSTADDR:
+		if len(optVal) < sizeOfInt32 {
+			return syserr.ErrInvalidArgument
+		}
+		v := int32(usermem.ByteOrder.Uint32(optVal))
+
+		ep.SocketOptions().SetReceiveOriginalDstAddress(v != 0)
+		return nil
 
 	case linux.IPV6_TCLASS:
 		if len(optVal) < sizeOfInt32 {
@@ -2325,6 +2335,18 @@ func setSockOptIP(t *kernel.Task, s socket.SocketOps, ep commonEndpoint, name in
 		ep.SocketOptions().SetHeaderIncluded(v != 0)
 		return nil
 
+	case linux.IP_RECVORIGDSTADDR:
+		if len(optVal) == 0 {
+			return nil
+		}
+		v, err := parseIntOrChar(optVal)
+		if err != nil {
+			return err
+		}
+
+		ep.SocketOptions().SetReceiveOriginalDstAddress(v != 0)
+		return nil
+
 	case linux.IPT_SO_SET_REPLACE:
 		if len(optVal) < linux.SizeOfIPTReplace {
 			return syserr.ErrInvalidArgument
@@ -2363,7 +2385,6 @@ func setSockOptIP(t *kernel.Task, s socket.SocketOps, ep commonEndpoint, name in
 		linux.IP_RECVERR,
 		linux.IP_RECVFRAGSIZE,
 		linux.IP_RECVOPTS,
-		linux.IP_RECVORIGDSTADDR,
 		linux.IP_RECVTTL,
 		linux.IP_RETOPTS,
 		linux.IP_TRANSPARENT,
@@ -2441,7 +2462,6 @@ func emitUnimplementedEventIPv6(t *kernel.Task, name int) {
 		linux.IPV6_RECVFRAGSIZE,
 		linux.IPV6_RECVHOPLIMIT,
 		linux.IPV6_RECVHOPOPTS,
-		linux.IPV6_RECVORIGDSTADDR,
 		linux.IPV6_RECVPATHMTU,
 		linux.IPV6_RECVPKTINFO,
 		linux.IPV6_RECVRTHDR,
@@ -2746,14 +2766,16 @@ func (s *socketOpsCommon) nonBlockingRead(ctx context.Context, dst usermem.IOSeq
 func (s *socketOpsCommon) controlMessages() socket.ControlMessages {
 	return socket.ControlMessages{
 		IP: tcpip.ControlMessages{
-			HasTimestamp:    s.readCM.HasTimestamp && s.sockOptTimestamp,
-			Timestamp:       s.readCM.Timestamp,
-			HasTOS:          s.readCM.HasTOS,
-			TOS:             s.readCM.TOS,
-			HasTClass:       s.readCM.HasTClass,
-			TClass:          s.readCM.TClass,
-			HasIPPacketInfo: s.readCM.HasIPPacketInfo,
-			PacketInfo:      s.readCM.PacketInfo,
+			HasTimestamp:          s.readCM.HasTimestamp && s.sockOptTimestamp,
+			Timestamp:             s.readCM.Timestamp,
+			HasTOS:                s.readCM.HasTOS,
+			TOS:                   s.readCM.TOS,
+			HasTClass:             s.readCM.HasTClass,
+			TClass:                s.readCM.TClass,
+			HasIPPacketInfo:       s.readCM.HasIPPacketInfo,
+			PacketInfo:            s.readCM.PacketInfo,
+			HasOriginalDstAddress: s.readCM.HasOriginalDstAddress,
+			OriginalDstAddress:    s.readCM.OriginalDstAddress,
 		},
 	}
 }

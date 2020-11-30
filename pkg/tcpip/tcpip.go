@@ -49,8 +49,9 @@ const ipv4AddressSize = 4
 // Error represents an error in the netstack error space. Using a special type
 // ensures that errors outside of this space are not accidentally introduced.
 //
-// Note: to support save / restore, it is important that all tcpip errors have
-// distinct error messages.
+// All errors must have unique msg strings.
+//
+// +stateify savable
 type Error struct {
 	msg string
 
@@ -491,6 +492,14 @@ type ControlMessages struct {
 
 	// PacketInfo holds interface and address data on an incoming packet.
 	PacketInfo IPPacketInfo
+
+	// HasOriginalDestinationAddress indicates whether OriginalDstAddress is
+	// set.
+	HasOriginalDstAddress bool
+
+	// OriginalDestinationAddress holds the original destination address
+	// and port of the incoming packet.
+	OriginalDstAddress FullAddress
 }
 
 // PacketOwner is used to get UID and GID of the packet.
@@ -734,10 +743,6 @@ const (
 	// number of unread bytes in the input buffer should be returned.
 	ReceiveQueueSizeOption
 
-	// SendBufferSizeOption is used by SetSockOptInt/GetSockOptInt to
-	// specify the send buffer size option.
-	SendBufferSizeOption
-
 	// ReceiveBufferSizeOption is used by SetSockOptInt/GetSockOptInt to
 	// specify the receive buffer size option.
 	ReceiveBufferSizeOption
@@ -904,14 +909,6 @@ type GettableSocketOption interface {
 type SettableSocketOption interface {
 	isSettableSocketOption()
 }
-
-// BindToDeviceOption is used by SetSockOpt/GetSockOpt to specify that sockets
-// should bind only on a specific NIC.
-type BindToDeviceOption NICID
-
-func (*BindToDeviceOption) isGettableSocketOption() {}
-
-func (*BindToDeviceOption) isSettableSocketOption() {}
 
 // TCPInfoOption is used by GetSockOpt to expose TCP statistics.
 //
@@ -1087,14 +1084,6 @@ type RemoveMembershipOption MembershipOption
 
 func (*RemoveMembershipOption) isSettableSocketOption() {}
 
-// OutOfBandInlineOption is used by SetSockOpt/GetSockOpt to specify whether
-// TCP out-of-band data is delivered along with the normal in-band data.
-type OutOfBandInlineOption int
-
-func (*OutOfBandInlineOption) isGettableSocketOption() {}
-
-func (*OutOfBandInlineOption) isSettableSocketOption() {}
-
 // SocketDetachFilterOption is used by SetSockOpt to detach a previously attached
 // classic BPF filter on a given endpoint.
 type SocketDetachFilterOption int
@@ -1143,10 +1132,6 @@ type LingerOption struct {
 	Enabled bool
 	Timeout time.Duration
 }
-
-func (*LingerOption) isGettableSocketOption() {}
-
-func (*LingerOption) isSettableSocketOption() {}
 
 // IPPacketInfo is the message structure for IP_PKTINFO.
 //
