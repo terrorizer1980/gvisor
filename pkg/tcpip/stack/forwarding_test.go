@@ -89,7 +89,6 @@ func (f *fwdTestNetworkEndpoint) HandlePacket(pkt *PacketBuffer) {
 	if err != nil {
 		return
 	}
-	defer r.Release()
 
 	vv := buffer.NewVectorisedView(pkt.Size(), pkt.Views())
 	pkt = NewPacketBuffer(PacketBufferOptions{
@@ -765,7 +764,7 @@ func TestForwardingWithFakeResolverManyPackets(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			ep1, ep2 := fwdTestNetFactory(t, test.proto, test.useNeighborCache)
 
-			for i := 0; i < maxPendingPacketsPerResolution+5; i++ {
+			for i := 0; i < maxPendingPacketsPerAddress+5; i++ {
 				// Inject inbound 'maxPendingPacketsPerResolution + 5' packets on NIC 1.
 				buf := buffer.NewView(30)
 				buf[dstAddrOffset] = 3
@@ -776,7 +775,7 @@ func TestForwardingWithFakeResolverManyPackets(t *testing.T) {
 				}))
 			}
 
-			for i := 0; i < maxPendingPacketsPerResolution; i++ {
+			for i := 0; i < maxPendingPacketsPerAddress; i++ {
 				var p fwdTestPacketInfo
 
 				select {

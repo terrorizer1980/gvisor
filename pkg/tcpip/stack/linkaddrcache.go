@@ -58,9 +58,6 @@ const (
 	incomplete entryState = iota
 	// ready means that the address has been resolved and can be used.
 	ready
-	// failed means that address resolution timed out and the address
-	// could not be resolved.
-	failed
 )
 
 // String implements Stringer.
@@ -70,8 +67,6 @@ func (s entryState) String() string {
 		return "incomplete"
 	case ready:
 		return "ready"
-	case failed:
-		return "failed"
 	default:
 		return fmt.Sprintf("unknown(%d)", s)
 	}
@@ -91,9 +86,29 @@ type linkAddrEntry struct {
 	// state transitions out of incomplete these waiters are notified.
 	wakers map[*sleep.Waker]struct{}
 
-	// done is used to allow callers to wait on address resolution. It is nil iff
-	// s is incomplete and resolution is not yet in progress.
+	// done is used to allow callers to wait on address resolution. It is nil
+	// iff s is incomplete and resolution is not yet in progress.
 	done chan struct{}
+
+	// callers is used to inform callers about the result of address resolution.
+	callers []func(tcpip.LinkAddress, bool)
+}
+
+// notify notifies whomever is waiting on address resolution. A zero value
+// linkAddr signifies failure.
+func (e *linkAddrEntry) notify(linkAddr tcpip.LinkAddress) {
+	for w := range e.wakers {
+		w.Assert()
+	}
+	e.wakers = nil
+	for _, callback := range e.callers {
+		callback(e.linkAddr, len(linkAddr) != 0)
+	}
+	e.callers = nil
+	if ch := e.done; ch != nil {
+		close(ch)
+		e.done = nil
+	}
 }
 
 // changeState sets the entry's state to ns, notifying any waiters.
@@ -103,17 +118,8 @@ type linkAddrEntry struct {
 // unconditionally - this is an implementation detail that allows for entries
 // to be reused.
 func (e *linkAddrEntry) changeState(ns entryState, expiration time.Time) {
-	// Notify whoever is waiting on address resolution when transitioning
-	// out of incomplete.
-	if e.s == incomplete && ns != incomplete {
-		for w := range e.wakers {
-			w.Assert()
-		}
-		e.wakers = nil
-		if ch := e.done; ch != nil {
-			close(ch)
-		}
-		e.done = nil
+	if e.s == incomplete && ns == ready {
+		e.notify(e.linkAddr)
 	}
 
 	if expiration.IsZero() || expiration.After(e.expiration) {
@@ -163,9 +169,9 @@ func (c *linkAddrCache) getOrCreateEntryLocked(k tcpip.FullAddress) *linkAddrEnt
 		delete(c.cache.table, entry.addr)
 		c.cache.lru.Remove(entry)
 
-		// Wake waiters and mark the soon-to-be-reused entry as expired. Note
-		// that the state passed doesn't matter when the zero time is passed.
-		entry.changeState(failed, time.Time{})
+		// Wake waiters and mark the soon-to-be-reused entry as expired.
+		entry.notify("" /* linkAddr */)
+		entry.expiration = time.Time{}
 	} else {
 		entry = new(linkAddrEntry)
 	}
@@ -180,7 +186,7 @@ func (c *linkAddrCache) getOrCreateEntryLocked(k tcpip.FullAddress) *linkAddrEnt
 }
 
 // get reports any known link address for k.
-func (c *linkAddrCache) get(k tcpip.FullAddress, linkRes LinkAddressResolver, localAddr tcpip.Address, nic NetworkInterface, waker *sleep.Waker) (tcpip.LinkAddress, <-chan struct{}, *tcpip.Error) {
+func (c *linkAddrCache) get(k tcpip.FullAddress, linkRes LinkAddressResolver, localAddr tcpip.Address, nic NetworkInterface, waker *sleep.Waker, callback func(tcpip.LinkAddress, bool)) (tcpip.LinkAddress, <-chan struct{}, *tcpip.Error) {
 	if linkRes != nil {
 		if addr, ok := linkRes.ResolveStaticAddress(k.Addr); ok {
 			return addr, nil, nil
@@ -191,19 +197,11 @@ func (c *linkAddrCache) get(k tcpip.FullAddress, linkRes LinkAddressResolver, lo
 	defer c.cache.Unlock()
 	entry := c.getOrCreateEntryLocked(k)
 	switch s := entry.s; s {
-	case ready, failed:
+	case ready:
 		if !time.Now().After(entry.expiration) {
 			// Not expired.
-			switch s {
-			case ready:
-				return entry.linkAddr, nil, nil
-			case failed:
-				return entry.linkAddr, nil, tcpip.ErrNoLinkAddress
-			default:
-				panic(fmt.Sprintf("invalid cache entry state: %s", s))
-			}
+			return entry.linkAddr, nil, nil
 		}
-
 		entry.changeState(incomplete, time.Time{})
 		fallthrough
 	case incomplete:
@@ -213,17 +211,13 @@ func (c *linkAddrCache) get(k tcpip.FullAddress, linkRes LinkAddressResolver, lo
 			}
 			entry.wakers[waker] = struct{}{}
 		}
-
+		if callback != nil {
+			entry.callers = append(entry.callers, callback)
+		}
 		if entry.done == nil {
-			// Address resolution needs to be initiated.
-			if linkRes == nil {
-				return entry.linkAddr, nil, tcpip.ErrNoLinkAddress
-			}
-
 			entry.done = make(chan struct{})
 			go c.startAddressResolution(k, linkRes, localAddr, nic, entry.done) // S/R-SAFE: link non-savable; wakers dropped synchronously.
 		}
-
 		return entry.linkAddr, entry.done, tcpip.ErrWouldBlock
 	default:
 		panic(fmt.Sprintf("invalid cache entry state: %s", s))
@@ -257,9 +251,9 @@ func (c *linkAddrCache) startAddressResolution(k tcpip.FullAddress, linkRes Link
 	}
 }
 
-// checkLinkRequest checks whether previous attempt to resolve address has succeeded
-// and mark the entry accordingly, e.g. ready, failed, etc. Return true if request
-// can stop, false if another request should be sent.
+// checkLinkRequest checks whether previous attempt to resolve address has
+// succeeded and mark the entry accordingly. Returns true if request can stop,
+// false if another request should be sent.
 func (c *linkAddrCache) checkLinkRequest(now time.Time, k tcpip.FullAddress, attempt int) bool {
 	c.cache.Lock()
 	defer c.cache.Unlock()
@@ -269,15 +263,16 @@ func (c *linkAddrCache) checkLinkRequest(now time.Time, k tcpip.FullAddress, att
 		return true
 	}
 	switch s := entry.s; s {
-	case ready, failed:
-		// Entry was made ready by resolver or failed. Either way we're done.
+	case ready:
+		// Entry was made ready by resolver.
 	case incomplete:
 		if attempt+1 < c.resolutionAttempts {
 			// No response yet, need to send another ARP request.
 			return false
 		}
-		// Max number of retries reached, mark entry as failed.
-		entry.changeState(failed, now.Add(c.ageLimit))
+		// Max number of retries reached, delete entry.
+		entry.notify("" /* linkAddr */)
+		delete(c.cache.table, k)
 	default:
 		panic(fmt.Sprintf("invalid cache entry state: %s", s))
 	}

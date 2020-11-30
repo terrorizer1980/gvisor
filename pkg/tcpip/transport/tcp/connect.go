@@ -462,7 +462,7 @@ func (h *handshake) processSegments() *tcpip.Error {
 
 func (h *handshake) resolveRoute() *tcpip.Error {
 	// Set up the wakers.
-	s := sleep.Sleeper{}
+	var s sleep.Sleeper
 	resolutionWaker := &sleep.Waker{}
 	s.AddWaker(resolutionWaker, wakerForResolution)
 	s.AddWaker(&h.ep.notificationWaker, wakerForNotification)
@@ -470,10 +470,16 @@ func (h *handshake) resolveRoute() *tcpip.Error {
 
 	// Initial action is to resolve route.
 	index := wakerForResolution
+	attemptedResolution := false
 	for {
 		switch index {
 		case wakerForResolution:
-			if _, err := h.ep.route.Resolve(resolutionWaker); err != tcpip.ErrWouldBlock {
+			if attemptedResolution && h.ep.route.IsResolutionRequired() {
+				return tcpip.ErrNoLinkAddress
+			}
+			if _, err := h.ep.route.Resolve(resolutionWaker); err == tcpip.ErrWouldBlock {
+				attemptedResolution = true
+			} else {
 				if err == tcpip.ErrNoLinkAddress {
 					h.ep.stats.SendErrors.NoLinkAddr.Increment()
 				} else if err != nil {
@@ -563,7 +569,7 @@ func (h *handshake) start() *tcpip.Error {
 // complete completes the TCP 3-way handshake initiated by h.start().
 func (h *handshake) complete() *tcpip.Error {
 	// Set up the wakers.
-	s := sleep.Sleeper{}
+	var s sleep.Sleeper
 	resendWaker := sleep.Waker{}
 	s.AddWaker(&resendWaker, wakerForResend)
 	s.AddWaker(&h.ep.notificationWaker, wakerForNotification)
@@ -1512,7 +1518,7 @@ func (e *endpoint) protocolMainLoop(handshake bool, wakerInitDone chan<- struct{
 	}
 
 	// Initialize the sleeper based on the wakers in funcs.
-	s := sleep.Sleeper{}
+	var s sleep.Sleeper
 	for i := range funcs {
 		s.AddWaker(funcs[i].w, i)
 	}
@@ -1699,7 +1705,7 @@ func (e *endpoint) doTimeWait() (twReuse func()) {
 	const notification = 2
 	const timeWaitDone = 3
 
-	s := sleep.Sleeper{}
+	var s sleep.Sleeper
 	defer s.Done()
 	s.AddWaker(&e.newSegmentWaker, newSegment)
 	s.AddWaker(&e.notificationWaker, notification)

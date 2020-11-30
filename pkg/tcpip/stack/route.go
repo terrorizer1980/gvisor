@@ -264,13 +264,14 @@ func (r *Route) ResolveWith(addr tcpip.LinkAddress) {
 	r.mu.remoteLinkAddress = addr
 }
 
-// Resolve attempts to resolve the link address if necessary. Returns ErrWouldBlock in
-// case address resolution requires blocking, e.g. wait for ARP reply. Waker is
-// notified when address resolution is complete (success or not).
+// Resolve attempts to resolve the link address if necessary.
 //
-// If address resolution is required, ErrNoLinkAddress and a notification channel is
-// returned for the top level caller to block. Channel is closed once address resolution
-// is complete (success or not).
+// Returns tcpip.ErrWouldBlock if address resolution requires blocking (e.g.
+// wait for ARP reply). If address resolution is required, a notification
+// channel is also returned for the caller to block. Channel is closed once
+// address resolution is complete (successful or not). If a waker is provided,
+// it will be notified when address resolution is complete, regardless of
+// success or failure.
 //
 // The NIC r uses must not be locked.
 func (r *Route) Resolve(waker *sleep.Waker) (<-chan struct{}, *tcpip.Error) {
@@ -301,7 +302,11 @@ func (r *Route) Resolve(waker *sleep.Waker) (<-chan struct{}, *tcpip.Error) {
 	}
 
 	if neigh := r.outgoingNIC.neigh; neigh != nil {
-		entry, ch, err := neigh.entry(nextAddr, linkAddressResolutionRequestLocalAddr, r.linkRes, waker)
+		entry, ch, err := neigh.entry(nextAddr, linkAddressResolutionRequestLocalAddr, r.linkRes, waker, func(linkAddress tcpip.LinkAddress, ok bool) {
+			if ok {
+				r.ResolveWith(linkAddress)
+			}
+		})
 		if err != nil {
 			return ch, err
 		}
@@ -309,7 +314,11 @@ func (r *Route) Resolve(waker *sleep.Waker) (<-chan struct{}, *tcpip.Error) {
 		return nil, nil
 	}
 
-	linkAddr, ch, err := r.linkCache.GetLinkAddress(r.outgoingNIC.ID(), nextAddr, linkAddressResolutionRequestLocalAddr, r.NetProto, waker)
+	linkAddr, ch, err := r.linkCache.GetLinkAddress(r.outgoingNIC.ID(), nextAddr, linkAddressResolutionRequestLocalAddr, r.NetProto, waker, func(linkAddress tcpip.LinkAddress, ok bool) {
+		if ok {
+			r.ResolveWith(linkAddress)
+		}
+	})
 	if err != nil {
 		return ch, err
 	}
