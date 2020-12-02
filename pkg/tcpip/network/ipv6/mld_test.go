@@ -55,7 +55,10 @@ func TestIPv6JoinLeaveSolicitedNodeAddressPerformsMLD(t *testing.T) {
 			t.Fatal("expected a report message to be sent")
 		}
 		snmc := header.SolicitedNodeAddr(addr1)
-		checker.IPv6(t, header.IPv6(stack.PayloadSince(p.Pkt.NetworkHeader())),
+		checker.IPv6WithExtHdr(t, stack.PayloadSince(p.Pkt.NetworkHeader()),
+			checker.IPv6ExtHdr(
+				checker.IPv6HopByHopExtensionHeader(checker.IPv6RouterAlert(header.IPv6RouterAlertMLD)),
+			),
 			checker.DstAddr(snmc),
 			// Hop Limit for an MLD message must be 1 as per RFC 2710 section 3.
 			checker.TTL(1),
@@ -78,7 +81,10 @@ func TestIPv6JoinLeaveSolicitedNodeAddressPerformsMLD(t *testing.T) {
 			t.Fatal("expected a done message to be sent")
 		}
 		snmc := header.SolicitedNodeAddr(addr1)
-		checker.IPv6(t, header.IPv6(stack.PayloadSince(p.Pkt.NetworkHeader())),
+		checker.IPv6WithExtHdr(t, stack.PayloadSince(p.Pkt.NetworkHeader()),
+			checker.IPv6ExtHdr(
+				checker.IPv6HopByHopExtensionHeader(checker.IPv6RouterAlert(header.IPv6RouterAlertMLD)),
+			),
 			checker.DstAddr(header.IPv6AllRoutersMulticastAddress),
 			checker.TTL(1),
 			checker.MLD(header.ICMPv6MulticastListenerDone, header.MLDMinimumSize,
