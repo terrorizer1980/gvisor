@@ -210,29 +210,30 @@ func (d *dentry) renameLowerMerkleAt(ctx context.Context, vfsObj *vfs.VirtualFil
 
 // newFileFD creates a new file in the verity mount, and returns the FD. The FD
 // points to a file that has random data generated.
-func newFileFD(ctx context.Context, t *testing.T, vfsObj *vfs.VirtualFilesystem, root vfs.VirtualDentry, filePath string, mode linux.FileMode) (*vfs.FileDescription, int, error) {
+func newFileFD(ctx context.Context, t *testing.T, vfsObj *vfs.VirtualFilesystem, root vfs.VirtualDentry, filePath string, mode linux.FileMode, empty bool) (*vfs.FileDescription, int, error) {
 	// Create the file in the underlying file system.
 	lowerFD, err := dentryFromVD(t, root).openLowerAt(ctx, vfsObj, filePath, linux.O_RDWR|linux.O_CREAT|linux.O_EXCL, linux.ModeRegular|mode)
 	if err != nil {
 		return nil, 0, err
 	}
+	dataSize := 0
+	if !empty {
+		// Generate random data to be written to the file.
+		dataSize = rand.Intn(maxDataSize) + 1
+		data := make([]byte, dataSize)
+		rand.Read(data)
 
-	// Generate random data to be written to the file.
-	dataSize := rand.Intn(maxDataSize) + 1
-	data := make([]byte, dataSize)
-	rand.Read(data)
+		// Write directly to the underlying FD, since verity FD is read-only.
+		n, err := lowerFD.Write(ctx, usermem.BytesIOSequence(data), vfs.WriteOptions{})
+		if err != nil {
+			return nil, 0, err
+		}
 
-	// Write directly to the underlying FD, since verity FD is read-only.
-	n, err := lowerFD.Write(ctx, usermem.BytesIOSequence(data), vfs.WriteOptions{})
-	if err != nil {
-		return nil, 0, err
+		if n != int64(len(data)) {
+			return nil, 0, fmt.Errorf("lowerFD.Write got write length %d, want %d", n, len(data))
+		}
+		lowerFD.DecRef(ctx)
 	}
-
-	if n != int64(len(data)) {
-		return nil, 0, fmt.Errorf("lowerFD.Write got write length %d, want %d", n, len(data))
-	}
-
-	lowerFD.DecRef(ctx)
 
 	// Now open the verity file descriptor.
 	fd, err := openVerityAt(ctx, vfsObj, root, filePath, linux.O_RDONLY, mode)
@@ -272,7 +273,7 @@ func TestOpen(t *testing.T) {
 		}
 
 		filename := "verity-test-file"
-		fd, _, err := newFileFD(ctx, t, vfsObj, root, filename, 0644)
+		fd, _, err := newFileFD(ctx, t, vfsObj, root, filename, 0644, false)
 		if err != nil {
 			t.Fatalf("newFileFD: %v", err)
 		}
@@ -299,7 +300,7 @@ func TestPReadUnmodifiedFileSucceeds(t *testing.T) {
 		}
 
 		filename := "verity-test-file"
-		fd, size, err := newFileFD(ctx, t, vfsObj, root, filename, 0644)
+		fd, size, err := newFileFD(ctx, t, vfsObj, root, filename, 0644, false)
 		if err != nil {
 			t.Fatalf("newFileFD: %v", err)
 		}
@@ -329,7 +330,37 @@ func TestReadUnmodifiedFileSucceeds(t *testing.T) {
 		}
 
 		filename := "verity-test-file"
-		fd, size, err := newFileFD(ctx, t, vfsObj, root, filename, 0644)
+		fd, size, err := newFileFD(ctx, t, vfsObj, root, filename, 0644, false)
+		if err != nil {
+			t.Fatalf("newFileFD: %v", err)
+		}
+
+		// Enable verity on the file and confirm a normal read succeeds.
+		enableVerity(ctx, t, fd)
+
+		buf := make([]byte, size)
+		n, err := fd.Read(ctx, usermem.BytesIOSequence(buf), vfs.ReadOptions{})
+		if err != nil && err != io.EOF {
+			t.Fatalf("fd.Read: %v", err)
+		}
+
+		if n != int64(size) {
+			t.Errorf("fd.PRead got read length %d, want %d", n, size)
+		}
+	}
+}
+
+// TestReadUnmodifiedEmptyFileSucceeds ensures that read from an untouched empty verity
+// file succeeds after enabling verity for it.
+func TestReadUnmodifiedEmptyFileSucceeds(t *testing.T) {
+	for _, alg := range hashAlgs {
+		vfsObj, root, ctx, err := newVerityRoot(t, alg)
+		if err != nil {
+			t.Fatalf("newVerityRoot: %v", err)
+		}
+
+		filename := "verity-test-file"
+		fd, size, err := newFileFD(ctx, t, vfsObj, root, filename, 0644, true)
 		if err != nil {
 			t.Fatalf("newFileFD: %v", err)
 		}
@@ -359,7 +390,7 @@ func TestReopenUnmodifiedFileSucceeds(t *testing.T) {
 		}
 
 		filename := "verity-test-file"
-		fd, _, err := newFileFD(ctx, t, vfsObj, root, filename, 0644)
+		fd, _, err := newFileFD(ctx, t, vfsObj, root, filename, 0644, false)
 		if err != nil {
 			t.Fatalf("newFileFD: %v", err)
 		}
@@ -383,7 +414,7 @@ func TestOpenNonexistentFile(t *testing.T) {
 	}
 
 	filename := "verity-test-file"
-	fd, _, err := newFileFD(ctx, t, vfsObj, root, filename, 0644)
+	fd, _, err := newFileFD(ctx, t, vfsObj, root, filename, 0644, false)
 	if err != nil {
 		t.Fatalf("newFileFD: %v", err)
 	}
@@ -415,7 +446,7 @@ func TestPReadModifiedFileFails(t *testing.T) {
 		}
 
 		filename := "verity-test-file"
-		fd, size, err := newFileFD(ctx, t, vfsObj, root, filename, 0644)
+		fd, size, err := newFileFD(ctx, t, vfsObj, root, filename, 0644, false)
 		if err != nil {
 			t.Fatalf("newFileFD: %v", err)
 		}
@@ -451,7 +482,7 @@ func TestReadModifiedFileFails(t *testing.T) {
 		}
 
 		filename := "verity-test-file"
-		fd, size, err := newFileFD(ctx, t, vfsObj, root, filename, 0644)
+		fd, size, err := newFileFD(ctx, t, vfsObj, root, filename, 0644, false)
 		if err != nil {
 			t.Fatalf("newFileFD: %v", err)
 		}
@@ -487,7 +518,7 @@ func TestModifiedMerkleFails(t *testing.T) {
 		}
 
 		filename := "verity-test-file"
-		fd, size, err := newFileFD(ctx, t, vfsObj, root, filename, 0644)
+		fd, size, err := newFileFD(ctx, t, vfsObj, root, filename, 0644, false)
 		if err != nil {
 			t.Fatalf("newFileFD: %v", err)
 		}
@@ -530,7 +561,7 @@ func TestModifiedParentMerkleFails(t *testing.T) {
 		}
 
 		filename := "verity-test-file"
-		fd, _, err := newFileFD(ctx, t, vfsObj, root, filename, 0644)
+		fd, _, err := newFileFD(ctx, t, vfsObj, root, filename, 0644, false)
 		if err != nil {
 			t.Fatalf("newFileFD: %v", err)
 		}
@@ -589,7 +620,7 @@ func TestUnmodifiedStatSucceeds(t *testing.T) {
 		}
 
 		filename := "verity-test-file"
-		fd, _, err := newFileFD(ctx, t, vfsObj, root, filename, 0644)
+		fd, _, err := newFileFD(ctx, t, vfsObj, root, filename, 0644, false)
 		if err != nil {
 			t.Fatalf("newFileFD: %v", err)
 		}
@@ -612,7 +643,7 @@ func TestModifiedStatFails(t *testing.T) {
 		}
 
 		filename := "verity-test-file"
-		fd, _, err := newFileFD(ctx, t, vfsObj, root, filename, 0644)
+		fd, _, err := newFileFD(ctx, t, vfsObj, root, filename, 0644, false)
 		if err != nil {
 			t.Fatalf("newFileFD: %v", err)
 		}
@@ -671,7 +702,7 @@ func TestOpenDeletedFileFails(t *testing.T) {
 			}
 
 			filename := "verity-test-file"
-			fd, _, err := newFileFD(ctx, t, vfsObj, root, filename, 0644)
+			fd, _, err := newFileFD(ctx, t, vfsObj, root, filename, 0644, false)
 			if err != nil {
 				t.Fatalf("newFileFD: %v", err)
 			}
@@ -732,7 +763,7 @@ func TestOpenRenamedFileFails(t *testing.T) {
 			}
 
 			filename := "verity-test-file"
-			fd, _, err := newFileFD(ctx, t, vfsObj, root, filename, 0644)
+			fd, _, err := newFileFD(ctx, t, vfsObj, root, filename, 0644, false)
 			if err != nil {
 				t.Fatalf("newFileFD: %v", err)
 			}

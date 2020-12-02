@@ -350,9 +350,14 @@ type VerifyParams struct {
 // For verifyMetadata, params.data is not needed. It only accesses params.tree
 // for the raw root hash.
 func verifyMetadata(params *VerifyParams, layout *Layout) error {
-	root := make([]byte, layout.digestSize)
-	if _, err := params.Tree.ReadAt(root, layout.blockOffset(layout.rootLevel(), 0 /* index */)); err != nil {
-		return fmt.Errorf("failed to read root hash: %w", err)
+	var root []byte
+	// Read the root hash only for the case when the Merkle tree file is expected
+	// to not be empty.
+	if params.Size != 0 {
+		root = make([]byte, layout.digestSize)
+		if _, err := params.Tree.ReadAt(root, layout.blockOffset(layout.rootLevel(), 0 /* index */)); err != nil {
+			return fmt.Errorf("failed to read root hash: %w", err)
+		}
 	}
 	descriptor := VerityDescriptor{
 		Name:     params.Name,
