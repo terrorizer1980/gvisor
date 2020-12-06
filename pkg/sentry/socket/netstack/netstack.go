@@ -298,7 +298,7 @@ type socketOpsCommon struct {
 	readView buffer.View
 	// readCM holds control message information for the last packet read
 	// from Endpoint.
-	readCM         tcpip.ControlMessages
+	readCM         socket.IPControlMessages
 	sender         tcpip.FullAddress
 	linkPacketInfo tcpip.LinkPacketInfo
 
@@ -386,7 +386,7 @@ func (s *socketOpsCommon) fetchReadView() *syserr.Error {
 	}
 
 	s.readView = v
-	s.readCM = cms
+	s.readCM = socket.NewIPControlMessagges(cms)
 	atomic.StoreUint32(&s.readViewHasData, 1)
 
 	return nil
@@ -2679,7 +2679,7 @@ func (s *socketOpsCommon) nonBlockingRead(ctx context.Context, dst usermem.IOSeq
 		// We need to peek beyond the first message.
 		dst = dst.DropFirst(n)
 		num, err := dst.CopyOutFrom(ctx, safemem.FromVecReaderFunc{func(dsts [][]byte) (int64, error) {
-			n, _, err := s.Endpoint.Peek(dsts)
+			n, err := s.Endpoint.Peek(dsts)
 			// TODO(b/78348848): Handle peek timestamp.
 			if err != nil {
 				return int64(n), syserr.TranslateNetstackError(err).ToError()
@@ -2723,9 +2723,11 @@ func (s *socketOpsCommon) nonBlockingRead(ctx context.Context, dst usermem.IOSeq
 
 func (s *socketOpsCommon) controlMessages() socket.ControlMessages {
 	return socket.ControlMessages{
-		IP: tcpip.ControlMessages{
+		IP: socket.IPControlMessages{
 			HasTimestamp:    s.readCM.HasTimestamp && s.sockOptTimestamp,
 			Timestamp:       s.readCM.Timestamp,
+			HasInq:          s.readCM.HasInq,
+			Inq:             s.readCM.Inq,
 			HasTOS:          s.readCM.HasTOS,
 			TOS:             s.readCM.TOS,
 			HasTClass:       s.readCM.HasTClass,

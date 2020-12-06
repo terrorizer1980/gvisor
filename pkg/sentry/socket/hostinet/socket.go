@@ -436,19 +436,10 @@ func (s *socketOpsCommon) RecvMsg(t *kernel.Task, dst usermem.IOSequence, flags 
 	var controlBuf []byte
 	var msgFlags int
 
-	recvmsgToBlocks := safemem.ReaderFunc(func(dsts safemem.BlockSeq) (uint64, error) {
-		// Refuse to do anything if any part of dst.Addrs was unusable.
-		if uint64(dst.NumBytes()) != dsts.NumBytes() {
-			return 0, nil
-		}
-		if dsts.IsEmpty() {
-			return 0, nil
-		}
-
+	recvMsgFromHost := func(iovs []syscall.Iovec) (uint64, error) {
 		// We always do a non-blocking recv*().
 		sysflags := flags | syscall.MSG_DONTWAIT
 
-		iovs := safemem.IovecsFromBlockSeq(dsts)
 		msg := syscall.Msghdr{
 			Iov:    &iovs[0],
 			Iovlen: uint64(len(iovs)),
@@ -473,10 +464,33 @@ func (s *socketOpsCommon) RecvMsg(t *kernel.Task, dst usermem.IOSequence, flags 
 		msgFlags = int(msg.Flags)
 		controlLen = uint64(msg.Controllen)
 		return n, nil
-	})
+	}
+
+	copyToDst := func() (int64, error) {
+		if dst.NumBytes() == 0 {
+			// We want to make the recvmsg(2) call to the host even if dst is empty
+			// to fetch control messages, sender address or errors if any occur.
+			emptyIovs := make([]syscall.Iovec, 1)
+			n, err := recvMsgFromHost(emptyIovs)
+			return int64(n), err
+		}
+
+		recvmsgToBlocks := safemem.ReaderFunc(func(dsts safemem.BlockSeq) (uint64, error) {
+			// Refuse to do anything if any part of dst.Addrs was unusable.
+			if uint64(dst.NumBytes()) != dsts.NumBytes() {
+				return 0, nil
+			}
+			if dsts.IsEmpty() {
+				return 0, nil
+			}
+
+			return recvMsgFromHost(safemem.IovecsFromBlockSeq(dsts))
+		})
+		return dst.CopyOutFrom(t, recvmsgToBlocks)
+	}
 
 	var ch chan struct{}
-	n, err := dst.CopyOutFrom(t, recvmsgToBlocks)
+	n, err := copyToDst()
 	if flags&syscall.MSG_DONTWAIT == 0 {
 		for err == syserror.ErrWouldBlock {
 			// We only expect blocking to come from the actual syscall, in which
@@ -494,7 +508,7 @@ func (s *socketOpsCommon) RecvMsg(t *kernel.Task, dst usermem.IOSequence, flags 
 				s.EventRegister(&e, waiter.EventIn)
 				defer s.EventUnregister(&e)
 			}
-			n, err = dst.CopyOutFrom(t, recvmsgToBlocks)
+			n, err = copyToDst()
 		}
 	}
 	if err != nil {
@@ -523,7 +537,7 @@ func (s *socketOpsCommon) RecvMsg(t *kernel.Task, dst usermem.IOSequence, flags 
 				controlMessages.IP.HasIPPacketInfo = true
 				var packetInfo linux.ControlMessageIPPacketInfo
 				binary.Unmarshal(unixCmsg.Data[:linux.SizeOfControlMessageIPPacketInfo], usermem.ByteOrder, &packetInfo)
-				controlMessages.IP.PacketInfo = control.NewIPPacketInfo(packetInfo)
+				controlMessages.IP.PacketInfo = packetInfo
 			}
 
 		case syscall.SOL_IPV6:
