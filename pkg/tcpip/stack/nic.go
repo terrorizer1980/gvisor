@@ -634,14 +634,16 @@ func (n *NIC) DeliverNetworkPacket(remote, local tcpip.LinkAddress, protocol tcp
 	pkt.RXTransportChecksumValidated = n.LinkEndpoint.Capabilities()&CapabilityRXChecksumOffload != 0
 
 	// Are any packet type sockets listening for this network protocol?
-	packetEPs := n.mu.packetEPs[protocol]
-	// Add any other packet type sockets that may be listening for all protocols.
-	packetEPs = append(packetEPs, n.mu.packetEPs[header.EthernetProtocolAll]...)
+	protocolPacketEPs := n.mu.packetEPs[protocol]
+	// Other packet type sockets that are listening for all protocols.
+	anyPacketEPs := n.mu.packetEPs[header.EthernetProtocolAll]
 	n.mu.RUnlock()
-	for _, ep := range packetEPs {
-		p := pkt.Clone()
-		p.PktType = tcpip.PacketHost
-		ep.HandlePacket(n.id, local, protocol, p)
+	for _, eps := range [][]PacketEndpoint{protocolPacketEPs, anyPacketEPs} {
+		for _, ep := range eps {
+			p := pkt.Clone()
+			p.PktType = tcpip.PacketHost
+			ep.HandlePacket(n.id, local, protocol, p)
+		}
 	}
 
 	// Parse headers.
