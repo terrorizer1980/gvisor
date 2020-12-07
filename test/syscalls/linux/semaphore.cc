@@ -20,6 +20,7 @@
 #include <atomic>
 #include <cerrno>
 #include <ctime>
+#include <stack>
 
 #include "gmock/gmock.h"
 #include "gtest/gtest.h"
@@ -34,6 +35,17 @@
 namespace gvisor {
 namespace testing {
 namespace {
+
+constexpr int kSemMap = 1024000000;
+constexpr int kSemMni = 32000;
+constexpr int kSemMns = 1024000000;
+constexpr int kSemMnu = 1024000000;
+constexpr int kSemMsl = 32000;
+constexpr int kSemOpm = 500;
+constexpr int kSemUme = 500;
+constexpr int kSemUsz = 20;
+constexpr int kSemVmx = 32767;
+constexpr int kSemAem = 32767;
 
 class AutoSem {
  public:
@@ -774,18 +786,80 @@ TEST(SemaphoreTest, SemopGetncntOnSignal_NoRandomSave) {
 }
 
 TEST(SemaphoreTest, IpcInfo) {
+  std::stack<int> sem_ids;
   struct seminfo info;
-  ASSERT_THAT(semctl(0, 0, IPC_INFO, &info), SyscallSucceeds());
+  for (int i = 0; i < 3; i++) {
+    int sem_id = 0;
+    ASSERT_THAT(sem_id = semget(IPC_PRIVATE, 1, 0600 | IPC_CREAT),
+                SyscallSucceeds());
+    sem_ids.push(sem_id);
+    EXPECT_THAT(semctl(0, 0, IPC_INFO, &info), SyscallSucceedsWithValue(i));
+  }
+  while (!sem_ids.empty()) {
+    int sem_id = sem_ids.top();
+    sem_ids.pop();
+    ASSERT_THAT(semctl(sem_id, 0, IPC_RMID), SyscallSucceeds());
+    int index = sem_ids.size() - 1;
+    EXPECT_THAT(semctl(0, 0, IPC_INFO, &info),
+                SyscallSucceedsWithValue(index >= 0 ? index : 0));
+  }
+  ASSERT_THAT(semctl(0, 0, IPC_INFO, &info), SyscallSucceedsWithValue(0));
 
-  EXPECT_EQ(info.semmap, 1024000000);
-  EXPECT_EQ(info.semmni, 32000);
-  EXPECT_EQ(info.semmns, 1024000000);
-  EXPECT_EQ(info.semmnu, 1024000000);
-  EXPECT_EQ(info.semmsl, 32000);
-  EXPECT_EQ(info.semopm, 500);
-  EXPECT_EQ(info.semume, 500);
-  EXPECT_EQ(info.semvmx, 32767);
-  EXPECT_EQ(info.semaem, 32767);
+  EXPECT_EQ(info.semmap, kSemMap);
+  EXPECT_EQ(info.semmni, kSemMni);
+  EXPECT_EQ(info.semmns, kSemMns);
+  EXPECT_EQ(info.semmnu, kSemMnu);
+  EXPECT_EQ(info.semmsl, kSemMsl);
+  EXPECT_EQ(info.semopm, kSemOpm);
+  EXPECT_EQ(info.semume, kSemUme);
+  EXPECT_EQ(info.semusz, kSemUsz);
+  EXPECT_EQ(info.semvmx, kSemVmx);
+  EXPECT_EQ(info.semaem, kSemAem);
+}
+
+TEST(SemaphoreTest, SemInfo) {
+  std::stack<int> sem_ids;
+  struct seminfo info;
+  constexpr int kSemSetSize = 10;
+  for (int i = 0; i < 3; i++) {
+    int sem_id = 0;
+    ASSERT_THAT(sem_id = semget(IPC_PRIVATE, kSemSetSize, 0600 | IPC_CREAT),
+                SyscallSucceeds());
+    sem_ids.push(sem_id);
+    int sem_sets_count = sem_ids.size();
+    int sems_count = sem_sets_count * kSemSetSize;
+    EXPECT_THAT(semctl(0, 0, SEM_INFO, &info), SyscallSucceedsWithValue(i));
+    EXPECT_EQ(info.semmap, kSemMap);
+    EXPECT_EQ(info.semmni, kSemMni);
+    EXPECT_EQ(info.semmns, kSemMns);
+    EXPECT_EQ(info.semmnu, kSemMnu);
+    EXPECT_EQ(info.semmsl, kSemMsl);
+    EXPECT_EQ(info.semopm, kSemOpm);
+    EXPECT_EQ(info.semume, kSemUme);
+    EXPECT_EQ(info.semusz, sem_sets_count);
+    EXPECT_EQ(info.semvmx, kSemVmx);
+    EXPECT_EQ(info.semaem, sems_count);
+  }
+  while (!sem_ids.empty()) {
+    int sem_id = sem_ids.top();
+    sem_ids.pop();
+    ASSERT_THAT(semctl(sem_id, 0, IPC_RMID), SyscallSucceeds());
+    int index = sem_ids.size() - 1;
+    int sem_sets_count = sem_ids.size();
+    int sems_count = sem_sets_count * kSemSetSize;
+    EXPECT_THAT(semctl(0, 0, SEM_INFO, &info),
+                SyscallSucceedsWithValue(index >= 0 ? index : 0));
+    EXPECT_EQ(info.semmap, kSemMap);
+    EXPECT_EQ(info.semmni, kSemMni);
+    EXPECT_EQ(info.semmns, kSemMns);
+    EXPECT_EQ(info.semmnu, kSemMnu);
+    EXPECT_EQ(info.semmsl, kSemMsl);
+    EXPECT_EQ(info.semopm, kSemOpm);
+    EXPECT_EQ(info.semume, kSemUme);
+    EXPECT_EQ(info.semusz, sem_sets_count);
+    EXPECT_EQ(info.semvmx, kSemVmx);
+    EXPECT_EQ(info.semaem, sems_count);
+  }
 }
 
 }  // namespace

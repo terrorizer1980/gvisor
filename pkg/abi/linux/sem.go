@@ -47,6 +47,7 @@ const (
 	SEMUME = SEMOPM
 	SEMMNU = SEMMNS
 	SEMMAP = SEMMNS
+	SEMUSZ = 20
 )
 
 const SEM_UNDO = 0x1000

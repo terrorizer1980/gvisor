@@ -52,6 +52,9 @@ type Registry struct {
 	mu         sync.Mutex `state:"nosave"`
 	semaphores map[int32]*Set
 	lastIDUsed int32
+	// indexes maintains a mapping between a set's index in virtual array and
+	// its identifier.
+	indexes map[int32]int32
 }
 
 // Set represents a set of semaphores that can be operated atomically.
@@ -113,6 +116,7 @@ func NewRegistry(userNS *auth.UserNamespace) *Registry {
 	return &Registry{
 		userNS:     userNS,
 		semaphores: make(map[int32]*Set),
+		indexes:    make(map[int32]int32),
 	}
 }
 
@@ -163,6 +167,9 @@ func (r *Registry) FindOrCreate(ctx context.Context, key, nsems int32, mode linu
 	}
 
 	// Apply system limits.
+	//
+	// Map semaphores and map indexes in a registry are of the same size,
+	// check map semaphores only here for the system limit.
 	if len(r.semaphores) >= setsMax {
 		return nil, syserror.EINVAL
 	}
@@ -186,10 +193,41 @@ func (r *Registry) IPCInfo() *linux.SemInfo {
 		SemMsl: linux.SEMMSL,
 		SemOpm: linux.SEMOPM,
 		SemUme: linux.SEMUME,
-		SemUsz: 0, // SemUsz not supported.
+		SemUsz: linux.SEMUSZ,
 		SemVmx: linux.SEMVMX,
 		SemAem: linux.SEMAEM,
 	}
+}
+
+// SemInfo Return a seminfo structure containing the same information as
+// for IPC_INFO, except that SemUsz field returns the number of existing
+// semaphore sets, and SemAem field returns the number of existing semaphores.
+func (r *Registry) SemInfo() *linux.SemInfo {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	info := r.IPCInfo()
+	info.SemUsz = uint32(len(r.semaphores))
+	info.SemAem = uint32(r.totalSems())
+
+	return info
+}
+
+// HighestIndex returns the index of the highest used entry in
+// the kernel's array.
+func (r *Registry) HighestIndex() int32 {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	// By default, highest used index is 0 even though
+	// there is no semaphroe set.
+	var highestIndex int32
+	for index := range r.indexes {
+		if index > highestIndex {
+			highestIndex = index
+		}
+	}
+	return highestIndex
 }
 
 // RemoveID removes set with give 'id' from the registry and marks the set as
@@ -202,6 +240,11 @@ func (r *Registry) RemoveID(id int32, creds *auth.Credentials) error {
 	if set == nil {
 		return syserror.EINVAL
 	}
+	index, found := r.findIndexByID(id)
+	if !found {
+		// Inconsistent state.
+		panic(fmt.Sprintf("unable to find an index for ID: %d", id))
+	}
 
 	set.mu.Lock()
 	defer set.mu.Unlock()
@@ -213,6 +256,7 @@ func (r *Registry) RemoveID(id int32, creds *auth.Credentials) error {
 	}
 
 	delete(r.semaphores, set.ID)
+	delete(r.indexes, index)
 	set.destroy()
 	return nil
 }
@@ -236,6 +280,11 @@ func (r *Registry) newSet(ctx context.Context, key int32, owner, creator fs.File
 			continue
 		}
 		if r.semaphores[id] == nil {
+			index, found := r.findFirstAvailableIndex()
+			if !found {
+				panic("unable to find an available index")
+			}
+			r.indexes[index] = id
 			r.lastIDUsed = id
 			r.semaphores[id] = set
 			set.ID = id
@@ -261,6 +310,24 @@ func (r *Registry) findByKey(key int32) *Set {
 		}
 	}
 	return nil
+}
+
+func (r *Registry) findIndexByID(id int32) (int32, bool) {
+	for k, v := range r.indexes {
+		if v == id {
+			return k, true
+		}
+	}
+	return 0, false
+}
+
+func (r *Registry) findFirstAvailableIndex() (int32, bool) {
+	for index := int32(0); index < setsMax; index++ {
+		if _, present := r.indexes[index]; !present {
+			return index, true
+		}
+	}
+	return 0, false
 }
 
 func (r *Registry) totalSems() int {
