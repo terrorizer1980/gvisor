@@ -108,7 +108,8 @@ func (d *Debug) Execute(_ context.Context, f *flag.FlagSet, args ...interface{})
 		for _, id := range ids {
 			candidate, err := container.LoadAndCheck(conf.RootDir, id)
 			if err != nil {
-				return Errorf("loading container %q: %v", id, err)
+				log.Warningf("Skipping container %q: %v", id, err)
+				continue
 			}
 			if candidate.SandboxPid() == d.pid {
 				c = candidate

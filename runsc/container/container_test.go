@@ -2332,6 +2332,42 @@ func TestTTYField(t *testing.T) {
 	}
 }
 
+// Test that container can run even when there are corrupt state files in the
+// root directiry.
+func TestCreateWithCorruptedStateFile(t *testing.T) {
+	conf := testutil.TestConfig(t)
+	spec := testutil.NewSpecWithArgs("/bin/true")
+	_, bundleDir, cleanup, err := testutil.SetupContainer(spec, conf)
+	if err != nil {
+		t.Fatalf("error setting up container: %v", err)
+	}
+	defer cleanup()
+
+	// Create corrupted state file.
+	corruptID := testutil.RandomContainerID()
+	corruptState := buildStatePath(conf.RootDir, corruptID)
+	if err := ioutil.WriteFile(corruptState, []byte("this{file(is;not[valid.json"), 0777); err != nil {
+		t.Fatalf("createCorruptStateFile(): %v", err)
+	}
+	defer os.Remove(corruptState)
+
+	if _, err := Load(conf.RootDir, corruptID); err == nil {
+		t.Fatalf("loading corrupted state file should have failed")
+	}
+
+	args := Args{
+		ID:        testutil.RandomContainerID(),
+		Spec:      spec,
+		BundleDir: bundleDir,
+		Attached:  true,
+	}
+	if ws, err := Run(conf, args); err != nil {
+		t.Errorf("running container: %v", err)
+	} else if !ws.Exited() || ws.ExitStatus() != 0 {
+		t.Errorf("container failed, waitStatus: %v", ws)
+	}
+}
+
 func execute(cont *Container, name string, arg ...string) (syscall.WaitStatus, error) {
 	args := &control.ExecArgs{
 		Filename: name,

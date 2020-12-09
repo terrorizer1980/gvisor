@@ -147,7 +147,8 @@ func loadSandbox(rootDir, id string) ([]*Container, error) {
 			if os.IsNotExist(err) {
 				continue
 			}
-			return nil, fmt.Errorf("loading container %q: %v", id, err)
+			log.Warningf("Skipping container %q: %v", id, err)
+			continue
 		}
 		if container.Sandbox.ID == id {
 			containers = append(containers, container)

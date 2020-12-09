@@ -24,6 +24,7 @@ import (
 
 	"github.com/google/subcommands"
 	specs "github.com/opencontainers/runtime-spec/specs-go"
+	"gvisor.dev/gvisor/pkg/log"
 	"gvisor.dev/gvisor/runsc/config"
 	"gvisor.dev/gvisor/runsc/container"
 	"gvisor.dev/gvisor/runsc/flag"
@@ -81,7 +82,8 @@ func (l *List) Execute(_ context.Context, f *flag.FlagSet, args ...interface{}) 
 	for _, id := range ids {
 		c, err := container.LoadAndCheck(conf.RootDir, id)
 		if err != nil {
-			Fatalf("loading container %q: %v", id, err)
+			log.Warningf("Skipping container %q: %v", id, err)
+			continue
 		}
 		containers = append(containers, c)
 	}
