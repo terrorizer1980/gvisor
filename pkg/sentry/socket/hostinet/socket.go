@@ -513,24 +513,48 @@ func (s *socketOpsCommon) RecvMsg(t *kernel.Task, dst usermem.IOSequence, flags 
 	controlMessages := socket.ControlMessages{}
 	for _, unixCmsg := range unixControlMessages {
 		switch unixCmsg.Header.Level {
-		case syscall.SOL_IP:
+		case linux.SOL_SOCKET:
 			switch unixCmsg.Header.Type {
-			case syscall.IP_TOS:
+			case linux.SO_TIMESTAMP:
+				controlMessages.IP.HasTimestamp = true
+				binary.Unmarshal(unixCmsg.Data[:linux.SizeOfTimeval], usermem.ByteOrder, &controlMessages.IP.Timestamp)
+			}
+
+		case linux.SOL_IP:
+			switch unixCmsg.Header.Type {
+			case linux.IP_TOS:
 				controlMessages.IP.HasTOS = true
 				binary.Unmarshal(unixCmsg.Data[:linux.SizeOfControlMessageTOS], usermem.ByteOrder, &controlMessages.IP.TOS)
 
-			case syscall.IP_PKTINFO:
+			case linux.IP_PKTINFO:
 				controlMessages.IP.HasIPPacketInfo = true
 				var packetInfo linux.ControlMessageIPPacketInfo
 				binary.Unmarshal(unixCmsg.Data[:linux.SizeOfControlMessageIPPacketInfo], usermem.ByteOrder, &packetInfo)
-				controlMessages.IP.PacketInfo = control.NewIPPacketInfo(packetInfo)
+				controlMessages.IP.PacketInfo = packetInfo
+
+			case linux.IP_RECVORIGDSTADDR:
+				var addr linux.SockAddrInet
+				binary.Unmarshal(unixCmsg.Data[:addr.SizeBytes()], usermem.ByteOrder, &addr)
+				controlMessages.IP.OriginalDstAddress = &addr
 			}
 
-		case syscall.SOL_IPV6:
+		case linux.SOL_IPV6:
 			switch unixCmsg.Header.Type {
-			case syscall.IPV6_TCLASS:
+			case linux.IPV6_TCLASS:
 				controlMessages.IP.HasTClass = true
 				binary.Unmarshal(unixCmsg.Data[:linux.SizeOfControlMessageTClass], usermem.ByteOrder, &controlMessages.IP.TClass)
+
+			case linux.IPV6_RECVORIGDSTADDR:
+				var addr linux.SockAddrInet6
+				binary.Unmarshal(unixCmsg.Data[:addr.SizeBytes()], usermem.ByteOrder, &addr)
+				controlMessages.IP.OriginalDstAddress = &addr
+			}
+
+		case linux.SOL_TCP:
+			switch unixCmsg.Header.Type {
+			case linux.TCP_INQ:
+				controlMessages.IP.HasInq = true
+				binary.Unmarshal(unixCmsg.Data[:linux.SizeOfControlMessageInq], usermem.ByteOrder, &controlMessages.IP.Inq)
 			}
 		}
 	}
@@ -551,7 +575,7 @@ func (s *socketOpsCommon) SendMsg(t *kernel.Task, src usermem.IOSequence, to []b
 	}
 	controlBuf := make([]byte, 0, space)
 	// PackControlMessages will append up to space bytes to controlBuf.
-	controlBuf = control.PackControlMessages(t, s.family, controlMessages, controlBuf)
+	controlBuf = control.PackControlMessages(t, controlMessages, controlBuf)
 
 	sendmsgFromBlocks := safemem.WriterFunc(func(srcs safemem.BlockSeq) (uint64, error) {
 		// Refuse to do anything if any part of src.Addrs was unusable.
