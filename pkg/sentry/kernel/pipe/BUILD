@@ -19,7 +19,6 @@ go_library(
     deps = [
         "//pkg/abi/linux",
         "//pkg/amutex",
-        "//pkg/buffer",
         "//pkg/context",
         "//pkg/marshal/primitive",
         "//pkg/safemem",
