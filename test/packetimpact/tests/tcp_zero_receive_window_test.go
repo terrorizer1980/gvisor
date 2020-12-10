@@ -46,8 +46,9 @@ func TestZeroReceiveWindow(t *testing.T) {
 
 			dut.SetSockOptInt(t, acceptFd, unix.IPPROTO_TCP, unix.TCP_NODELAY, 1)
 
-			samplePayload := &testbench.Payload{Bytes: make([]byte, payloadLen)} //testbench.GenerateRandomPayload(t, payloadLen)}
-			// Expect the DUT to eventually advertize zero receive window.
+			readOnce := false
+			samplePayload := &testbench.Payload{Bytes: testbench.GenerateRandomPayload(t, payloadLen)}
+			// Expect the DUT to eventually advertise zero receive window.
 			// The test would timeout otherwise.
 			for {
 				conn.Send(t, testbench.TCP{Flags: testbench.Uint8(header.TCPFlagAck | header.TCPFlagPsh)}, samplePayload)
@@ -55,7 +56,21 @@ func TestZeroReceiveWindow(t *testing.T) {
 				if err != nil {
 					t.Fatalf("expected packet was not received: %s", err)
 				}
-				if *gotTCP.WindowSize == 0 {
+				// Read once to trigger the subsequent window update from the
+				// DUT to grow the right edge of the receive window from what
+				// was advertised in the SYN-ACK. This ensures that we test
+				// for the full default buffer size (1MB on gVisor at the time
+				// of writing this comment), thus testing for cases when the
+				// scaled receive window size ends up > 65535 (0xffff).
+				if !readOnce {
+					if ret, _, err := dut.RecvWithErrno(context.Background(), t, acceptFd, int32(payloadLen), 0); ret == -1 {
+						t.Fatalf("dut.RecvWithErrno(ctx, t, %d, %d, 0) = %d,_, %s", acceptFd, payloadLen, ret, err)
+					}
+					readOnce = true
+				}
+				windowSize := *gotTCP.WindowSize
+				t.Logf("got window size = %d", windowSize)
+				if windowSize == 0 {
 					break
 				}
 			}
