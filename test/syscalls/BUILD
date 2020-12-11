@@ -680,6 +680,11 @@ syscall_test(
 
 syscall_test(
     size = "medium",
+    test = "//test/syscalls/linux:socket_ipv6_udp_unbound_loopback_test",
+)
+
+syscall_test(
+    size = "medium",
     shard_count = more_shards,
     # Takes too long under gotsan to run.
     tags = ["nogotsan"],
